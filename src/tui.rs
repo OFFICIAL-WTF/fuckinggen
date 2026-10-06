@@ -163,6 +163,8 @@ struct GalleryItem {
     /// Kept images already live in the save directory; the rest are staged in
     /// the session cache until the user decides.
     saved: bool,
+    /// Adopted from an earlier session: decode it the first time it is shown.
+    needs_load: bool,
     image: Option<image::DynamicImage>,
     protocol: Option<StatefulProtocol>,
 }
@@ -501,6 +503,9 @@ impl App {
         let input = args.initial_prompt.unwrap_or_default();
         let cursor = input.chars().count();
         let (ref_tx, ref_rx) = mpsc::channel();
+        // Pictures a previous session could not save (crash, forced quit) show
+        // up here again instead of rotting in the cache.
+        let adopted = files::adopt_stale_sessions(&session_dir);
         let mut app = App {
             picker,
             input,
@@ -546,6 +551,28 @@ impl App {
             quit: false,
             pending_login: false,
         };
+        for (path, prompt) in adopted {
+            let bytes = std::fs::metadata(&path)
+                .map(|meta| meta.len() as usize)
+                .unwrap_or(0);
+            app.gallery.push(GalleryItem {
+                path,
+                prompt,
+                bytes,
+                saved: false,
+                needs_load: true,
+                image: None,
+                protocol: None,
+            });
+        }
+        if let Some(last) = app.gallery.len().checked_sub(1) {
+            app.selected = Some(last);
+            let count = app.gallery.len();
+            app.set_status(
+                Level::Info,
+                format!("picked up {count} image(s) from an earlier session"),
+            );
+        }
         app.refresh_auth();
         app.refresh_palette();
         Ok(app)
@@ -1581,6 +1608,7 @@ impl App {
                         prompt: done.prompt.clone(),
                         bytes: done.bytes,
                         saved: false,
+                        needs_load: false,
                         image: Some(done.image.thumbnail(2048, 2048)),
                         protocol: None,
                     });
@@ -1822,12 +1850,19 @@ fn badge(connected: bool, note: &str) -> (Color, String) {
 
 fn draw_stage(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let running = matches!(app.job, Job::Running { .. });
-    if !running
-        && let Some(item) = app.selected.and_then(|index| app.gallery.get_mut(index))
-        && item.protocol.is_none()
-        && let Some(image) = item.image.take()
-    {
-        item.protocol = Some(app.picker.new_resize_protocol(image));
+    if !running && let Some(item) = app.selected.and_then(|index| app.gallery.get_mut(index)) {
+        if item.needs_load {
+            item.needs_load = false;
+            item.image = std::fs::read(&item.path)
+                .ok()
+                .and_then(|bytes| image::load_from_memory(&bytes).ok())
+                .map(|image| image.thumbnail(2048, 2048));
+        }
+        if item.protocol.is_none()
+            && let Some(image) = item.image.take()
+        {
+            item.protocol = Some(app.picker.new_resize_protocol(image));
+        }
     }
     let title = match app.selected.and_then(|index| app.gallery.get(index)) {
         Some(item) => {
@@ -3275,6 +3310,7 @@ mod tests {
             prompt: name.to_string(),
             bytes: 1,
             saved,
+            needs_load: false,
             image: None,
             protocol: None,
         };

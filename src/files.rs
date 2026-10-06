@@ -62,6 +62,67 @@ pub fn move_file(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Move renders a previous session left behind into `session_dir`, so a crashed
+/// window or a forced quit never costs the user a picture they paid for: the
+/// next session shows them in the gallery like anything else. Returns the moved
+/// files with a prompt guessed from their name.
+pub fn adopt_stale_sessions(session_dir: &Path) -> Vec<(PathBuf, String)> {
+    let Some(parent) = session_dir.parent() else {
+        return Vec::new();
+    };
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return Vec::new();
+    };
+    let ours = session_dir.file_name();
+    let mut adopted = Vec::new();
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        if !path.is_dir()
+            || name.to_string_lossy().starts_with('.')
+            || Some(name.as_os_str()) == ours
+        {
+            continue;
+        }
+        if !name.to_string_lossy().starts_with("session-") {
+            continue;
+        }
+        let Ok(files) = std::fs::read_dir(&path) else {
+            continue;
+        };
+        for file in files.flatten() {
+            let source = file.path();
+            if !is_image_path(&source) {
+                continue;
+            }
+            let Some(file_name) = source.file_name() else {
+                continue;
+            };
+            let target = session_dir.join(file_name);
+            if move_file(&source, &target).is_err() {
+                continue;
+            }
+            let prompt = Path::new(file_name)
+                .file_stem()
+                .map(|stem| stem.to_string_lossy().replace('-', " "))
+                .unwrap_or_default();
+            adopted.push((target, prompt));
+        }
+        // Only remove the old session when nothing is left in it.
+        let _ = std::fs::remove_dir(&path);
+    }
+    adopted
+}
+
+fn is_image_path(path: &Path) -> bool {
+    path.extension()
+        .and_then(|extension| extension.to_str())
+        .map(|extension| extension.to_ascii_lowercase())
+        .is_some_and(|extension| {
+            matches!(extension.as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif")
+        })
+}
+
 pub fn expand_tilde(input: &str) -> String {
     if input == "~" {
         return home_dir()
@@ -277,6 +338,31 @@ mod tests {
         // Empty values are ignored, and a missing drive is not a home.
         assert_eq!(home_from(env(&[("HOME", ""), ("HOMEPATH", r"\you")])), None);
         assert_eq!(home_from(env(&[])), None);
+    }
+
+    #[test]
+    fn earlier_sessions_are_adopted_not_lost() {
+        let cache = tempfile::tempdir().unwrap();
+        let ours = cache.path().join("session-222-2");
+        std::fs::create_dir(&ours).unwrap();
+        // A crashed session with a render in it, plus an empty one.
+        let stale = cache.path().join("session-111-1");
+        std::fs::create_dir(&stale).unwrap();
+        std::fs::write(stale.join("a-girl-holding-a-cup.png"), b"png").unwrap();
+        std::fs::write(stale.join("notes.txt"), b"ignore me").unwrap();
+        let empty = cache.path().join("session-333-3");
+        std::fs::create_dir(&empty).unwrap();
+
+        let adopted = adopt_stale_sessions(&ours);
+        assert_eq!(adopted.len(), 1, "only images are picked up");
+        let (path, prompt) = &adopted[0];
+        assert_eq!(path, &ours.join("a-girl-holding-a-cup.png"));
+        assert_eq!(prompt, "a girl holding a cup");
+        assert!(path.is_file(), "the render moved into the live session");
+        assert!(!stale.join("a-girl-holding-a-cup.png").exists());
+        assert!(!empty.exists(), "empty session directories are cleaned up");
+        // A directory with a non-image left in it survives, so nothing is eaten.
+        assert!(stale.exists());
     }
 
     #[test]
