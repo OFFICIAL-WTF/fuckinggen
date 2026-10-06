@@ -27,7 +27,7 @@ use crate::config::{self, Config};
 use crate::state;
 use crate::{auth, files, http, images};
 
-const TICK: Duration = Duration::from_millis(80);
+const TICK: Duration = Duration::from_millis(40);
 const MAX_INPUT_ROWS: u16 = 12;
 const MAX_GALLERY: usize = 16;
 const AUTH_REFRESH_TICKS: u64 = 40;
@@ -65,6 +65,21 @@ const COMMANDS: &[CommandSpec] = &[
         name: "/root",
         args: "",
         description: "move session images to ~/Downloads and save there",
+    },
+    CommandSpec {
+        name: "/save",
+        args: "",
+        description: "keep the selected image (moves it out of the session cache)",
+    },
+    CommandSpec {
+        name: "/save-all",
+        args: "",
+        description: "keep every image from this session",
+    },
+    CommandSpec {
+        name: "/ctx",
+        args: "",
+        description: "toggle handing the selected image to the next prompt",
     },
     CommandSpec {
         name: "/remove",
@@ -128,6 +143,7 @@ enum Hit {
     Input,
     Button,
     Quality,
+    Finish,
     Palette(usize),
     Reference(usize),
     Snake,
@@ -144,8 +160,31 @@ struct GalleryItem {
     path: PathBuf,
     prompt: String,
     bytes: usize,
+    /// Kept images already live in the save directory; the rest are staged in
+    /// the session cache until the user decides.
+    saved: bool,
     image: Option<image::DynamicImage>,
     protocol: Option<StatefulProtocol>,
+}
+
+/// One staged image in the "what do we keep" screen shown on the way out.
+struct FinishRow {
+    path: PathBuf,
+    prompt: String,
+    bytes: usize,
+    keep: bool,
+}
+
+/// The exit checklist: every unsaved generation of this session, all ticked.
+struct Finish {
+    rows: Vec<FinishRow>,
+    selection: usize,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum FinishButton {
+    KeepTicked,
+    Nothing,
 }
 
 enum Job {
@@ -219,7 +258,7 @@ impl SnakeDirection {
     }
 }
 
-const SNAKE_STEP: Duration = Duration::from_millis(180);
+const SNAKE_STEP: Duration = Duration::from_millis(130);
 /// The board is drawn as a square block in the middle of the output panel.
 const MIN_SNAKE_SIDE: u16 = 8;
 const MAX_SNAKE_SIDE: u16 = 28;
@@ -324,7 +363,13 @@ impl SnakeGame {
         if self.body.len() > 1 && direction == self.direction.opposite() {
             return;
         }
+        // Turning should feel instant: if this really is a new direction, let
+        // the next tick step instead of waiting out the rest of the interval.
+        let turning = direction != self.direction;
         self.queued_direction = Some(direction);
+        if turning && self.focused {
+            self.last_step = Instant::now() - SNAKE_STEP;
+        }
     }
 
     fn tick(&mut self) {
@@ -416,6 +461,7 @@ struct App {
     hit_input: Rect,
     hit_button: Rect,
     hit_quality: Rect,
+    hit_finish_button: Rect,
     hit_palette: Vec<(Rect, usize)>,
     hit_refs: Vec<(Rect, usize)>,
     hit_settings: Vec<(Rect, usize)>,
@@ -423,6 +469,15 @@ struct App {
     palette: Vec<usize>,
     palette_selection: usize,
     settings: Settings,
+    /// Scratch directory for generations the user has not decided about yet.
+    session_dir: PathBuf,
+    finish: Option<Finish>,
+    forced_quit: bool,
+    /// Follow-up generations hand the selected image back to the model, since
+    /// the backend request is stateless. `/ctx` turns it off.
+    carry_context: bool,
+    hit_finish_rows: Vec<(Rect, usize)>,
+    hit_finish_buttons: Vec<(Rect, FinishButton)>,
     help_open: bool,
     auth_ok: bool,
     auth_note: String,
@@ -432,7 +487,7 @@ struct App {
 
 impl App {
     fn new(args: TuiArgs) -> Result<Self> {
-        let picker = Picker::from_query_stdio().unwrap_or_else(|_| Picker::halfblocks());
+        let picker = terminal_picker();
         let config = config::load();
         let accent = accent_from_config(config.accent.as_deref());
         let quality = config
@@ -447,6 +502,13 @@ impl App {
                 None => std::env::current_dir().context("reading current directory")?,
             },
         };
+        let session_dir = files::cache_dir().join(format!(
+            "session-{}-{}",
+            std::process::id(),
+            files::now_unix()
+        ));
+        std::fs::create_dir_all(&session_dir)
+            .with_context(|| format!("creating {}", session_dir.display()))?;
         let input = args.initial_prompt.unwrap_or_default();
         let cursor = input.chars().count();
         let (ref_tx, ref_rx) = mpsc::channel();
@@ -473,6 +535,7 @@ impl App {
             hit_input: Rect::default(),
             hit_button: Rect::default(),
             hit_quality: Rect::default(),
+            hit_finish_button: Rect::default(),
             hit_palette: Vec::new(),
             hit_refs: Vec::new(),
             hit_settings: Vec::new(),
@@ -480,6 +543,12 @@ impl App {
             palette: Vec::new(),
             palette_selection: 0,
             settings: Settings::default(),
+            session_dir: session_dir.clone(),
+            finish: None,
+            forced_quit: false,
+            carry_context: true,
+            hit_finish_rows: Vec::new(),
+            hit_finish_buttons: Vec::new(),
             help_open: false,
             auth_ok: false,
             auth_note: String::new(),
@@ -608,6 +677,9 @@ impl App {
         if self.hit_quality.contains(position) {
             return Some(Hit::Quality);
         }
+        if self.hit_finish_button.contains(position) {
+            return Some(Hit::Finish);
+        }
         if self.hit_input.contains(position) {
             return Some(Hit::Input);
         }
@@ -621,6 +693,10 @@ impl App {
     }
 
     fn on_mouse(&mut self, mouse: MouseEvent) {
+        if self.finish.is_some() {
+            self.on_finish_mouse(mouse);
+            return;
+        }
         let hit = self.hit_test(mouse.column, mouse.row);
         match mouse.kind {
             MouseEventKind::Moved => self.hover = hit,
@@ -635,6 +711,7 @@ impl App {
                         self.focus = Focus::Input;
                         self.cycle_quality();
                     }
+                    Some(Hit::Finish) => self.request_quit(),
                     Some(Hit::Input) => self.focus = Focus::Input,
                     Some(Hit::Palette(index)) => {
                         self.focus = Focus::Input;
@@ -796,6 +873,19 @@ impl App {
             self.on_settings_key(key);
             return;
         }
+        if self.finish.is_some() {
+            // Inside the checklist, a second ctrl-c means "just get out".
+            if matches!(
+                (key.code, key.modifiers),
+                (KeyCode::Char('c'), KeyModifiers::CONTROL)
+            ) {
+                self.forced_quit = true;
+                self.quit = true;
+                return;
+            }
+            self.on_finish_key(key);
+            return;
+        }
         if self.snake.focused && self.snake_area.width > 0 && key.modifiers == KeyModifiers::NONE {
             let direction = match key.code {
                 KeyCode::Up => Some(SnakeDirection::Up),
@@ -813,7 +903,7 @@ impl App {
         let palette_open = !self.palette.is_empty();
         match (key.code, key.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL)
-            | (KeyCode::Char('q'), KeyModifiers::CONTROL) => self.quit = true,
+            | (KeyCode::Char('q'), KeyModifiers::CONTROL) => self.request_quit(),
             (KeyCode::Char('u'), KeyModifiers::CONTROL) => {
                 self.focus = Focus::Input;
                 self.input.clear();
@@ -895,6 +985,9 @@ impl App {
                         self.cursor = 0;
                         self.refresh_palette();
                     }
+                } else if self.input.trim().is_empty() && self.selected.is_some() {
+                    // Enter on an empty prompt keeps the image you are looking at.
+                    self.save_selected();
                 } else {
                     self.submit();
                 }
@@ -1020,6 +1113,13 @@ impl App {
             "/open" => self.reveal(false),
             "/view" => self.reveal(true),
             "/root" => self.move_to_downloads(),
+            "/save" => self.save_selected(),
+            "/save-all" => self.save_all_staged(),
+            "/ctx" => {
+                self.carry_context = !self.carry_context;
+                let state = if self.carry_context { "on" } else { "off" };
+                self.set_status(Level::Info, format!("follow-up context {state}"));
+            }
             "/remove" => self.remove_selected(),
             "/remove-all" => self.remove_all(),
             "/quality" => match args.first() {
@@ -1129,6 +1229,202 @@ impl App {
         }
     }
 
+    /// Move one staged generation into the save directory for good.
+    fn save_item(&mut self, index: usize) -> bool {
+        let Some(item) = self.gallery.get(index) else {
+            return false;
+        };
+        if item.saved {
+            let name = display_name(&item.path);
+            self.set_status(Level::Info, format!("{name} is already saved"));
+            return false;
+        }
+        if !item.path.is_file() {
+            self.set_status(Level::Err, "that file is gone".to_string());
+            return false;
+        }
+        let prompt = item.prompt.clone();
+        let staged = item.path.clone();
+        let requested = files::resolve_out_path(None, Some(&self.out_dir), &prompt, &staged);
+        let target = match files::prepare_path(&requested) {
+            Ok(path) => path,
+            Err(err) => {
+                let err = err.to_string();
+                self.set_status(Level::Err, format!("could not save: {err}"));
+                return false;
+            }
+        };
+        if let Err(err) = files::move_file(&staged, &target) {
+            let err = err.to_string();
+            self.set_status(Level::Err, format!("could not save: {err}"));
+            return false;
+        }
+        let _ = state::record(&target, &prompt);
+        if let Some(item) = self.gallery.get_mut(index) {
+            item.path = target.clone();
+            item.saved = true;
+        }
+        self.set_status(Level::Ok, format!("saved {}", target.display()));
+        true
+    }
+
+    fn save_selected(&mut self) {
+        let Some(index) = self.selected else {
+            self.set_status(Level::Err, "nothing generated yet");
+            return;
+        };
+        self.save_item(index);
+    }
+
+    fn save_all_staged(&mut self) {
+        let unsaved: Vec<usize> = self
+            .gallery
+            .iter()
+            .enumerate()
+            .filter(|(_, item)| !item.saved)
+            .map(|(index, _)| index)
+            .collect();
+        if unsaved.is_empty() {
+            self.set_status(Level::Info, "everything here is already saved");
+            return;
+        }
+        let saved = unsaved
+            .into_iter()
+            .filter(|index| self.save_item(*index))
+            .count();
+        let dir = self.out_dir.display().to_string();
+        self.set_status(Level::Ok, format!("saved {saved} image(s) to {dir}"));
+    }
+
+    fn unsaved_count(&self) -> usize {
+        self.gallery.iter().filter(|item| !item.saved).count()
+    }
+
+    /// Quitting runs through the keep/discard checklist unless there is nothing
+    /// staged, in which case there is nothing to ask about.
+    fn request_quit(&mut self) {
+        if self.finish.is_some() {
+            return;
+        }
+        if let Job::Running { cancel, .. } = &self.job {
+            cancel.store(true, Ordering::Relaxed);
+            self.set_status(Level::Info, "cancelling…");
+        }
+        let rows: Vec<FinishRow> = self
+            .gallery
+            .iter()
+            .filter(|item| !item.saved)
+            .map(|item| FinishRow {
+                path: item.path.clone(),
+                prompt: item.prompt.clone(),
+                bytes: item.bytes,
+                keep: true,
+            })
+            .collect();
+        if rows.is_empty() {
+            self.quit = true;
+            return;
+        }
+        self.finish = Some(Finish { rows, selection: 0 });
+    }
+
+    /// Apply the checklist: keep what is ticked, throw away what is not.
+    fn finish_save(&mut self) {
+        let Some(finish) = self.finish.take() else {
+            return;
+        };
+        let outcome = apply_finish(&finish.rows, &self.out_dir);
+        for saved in &outcome.saved {
+            let _ = state::record(&saved.to, &saved.prompt);
+            if let Some(item) = self.gallery.iter_mut().find(|item| item.path == saved.from) {
+                item.path = saved.to.clone();
+                item.saved = true;
+            }
+        }
+        for path in &outcome.discarded {
+            self.gallery.retain(|item| item.path != *path);
+        }
+        let kept = outcome.saved.len();
+        let dropped = outcome.discarded.len();
+        if kept > 0 {
+            self.set_status(
+                Level::Ok,
+                format!("saved {kept} image(s) to {}", self.out_dir.display()),
+            );
+        } else if dropped > 0 {
+            self.set_status(Level::Info, format!("discarded {dropped} image(s)"));
+        }
+        self.quit = true;
+    }
+
+    fn finish_discard(&mut self) {
+        let Some(finish) = self.finish.take() else {
+            return;
+        };
+        let count = finish.rows.len();
+        for row in &finish.rows {
+            let _ = std::fs::remove_file(&row.path);
+        }
+        self.gallery.retain(|item| item.saved);
+        self.set_status(Level::Info, format!("discarded {count} image(s)"));
+        self.quit = true;
+    }
+
+    fn on_finish_mouse(&mut self, mouse: MouseEvent) {
+        if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            return;
+        }
+        let position = Position::new(mouse.column, mouse.row);
+        for (rect, button) in &self.hit_finish_buttons {
+            if rect.contains(position) {
+                match button {
+                    FinishButton::KeepTicked => self.finish_save(),
+                    FinishButton::Nothing => self.finish_discard(),
+                }
+                return;
+            }
+        }
+        for (rect, index) in &self.hit_finish_rows {
+            if rect.contains(position) {
+                if let Some(finish) = self.finish.as_mut() {
+                    finish.selection = *index;
+                    if let Some(row) = finish.rows.get_mut(*index) {
+                        row.keep = !row.keep;
+                    }
+                }
+                return;
+            }
+        }
+    }
+
+    fn on_finish_key(&mut self, key: KeyEvent) {
+        let Some(finish) = self.finish.as_mut() else {
+            return;
+        };
+        let len = finish.rows.len();
+        match (key.code, key.modifiers) {
+            (KeyCode::Up, _) | (KeyCode::Char('k'), KeyModifiers::NONE) => {
+                finish.selection = (finish.selection + len - 1) % len;
+            }
+            (KeyCode::Down, _) | (KeyCode::Char('j'), KeyModifiers::NONE) => {
+                finish.selection = (finish.selection + 1) % len;
+            }
+            (KeyCode::Char(' '), KeyModifiers::NONE)
+            | (KeyCode::Char(' '), KeyModifiers::SHIFT) => {
+                if let Some(row) = finish.rows.get_mut(finish.selection) {
+                    row.keep = !row.keep;
+                }
+            }
+            (KeyCode::Enter, _) | (KeyCode::Char('a'), KeyModifiers::NONE) => self.finish_save(),
+            (KeyCode::Char('n'), KeyModifiers::NONE) => self.finish_discard(),
+            (KeyCode::Esc, _) => {
+                self.finish = None;
+                self.set_status(Level::Info, "nothing was changed");
+            }
+            _ => {}
+        }
+    }
+
     fn remove_selected(&mut self) {
         let Some(index) = self.selected else {
             self.set_status(Level::Err, "nothing generated yet");
@@ -1211,13 +1507,23 @@ impl App {
         if prompt.is_empty() {
             return;
         }
-        let ref_paths: Vec<PathBuf> = self.refs.iter().map(|item| item.path.clone()).collect();
+        let mut ref_paths: Vec<PathBuf> = self.refs.iter().map(|item| item.path.clone()).collect();
+        // Continuity: the backend keeps no conversation state (`store: false`),
+        // so a follow-up only makes sense with the previous picture attached.
+        if self.carry_context
+            && let Some(item) = self.selected.and_then(|index| self.gallery.get(index))
+            && !ref_paths.contains(&item.path)
+        {
+            ref_paths.push(item.path.clone());
+        }
         let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
+        // Generations are staged in the session cache; the user decides on the
+        // way out (or with /save) what actually lands in `out_dir`.
         spawn_worker(
             prompt,
             ref_paths,
-            self.out_dir.clone(),
+            self.session_dir.clone(),
             self.quality.clone(),
             tx,
             cancel.clone(),
@@ -1253,22 +1559,29 @@ impl App {
                         path: done.path.clone(),
                         prompt: done.prompt.clone(),
                         bytes: done.bytes,
+                        saved: false,
                         image: Some(done.image.thumbnail(2048, 2048)),
                         protocol: None,
                     });
-                    if self.gallery.len() > MAX_GALLERY {
-                        self.gallery.remove(0);
+                    while self.gallery.len() > MAX_GALLERY {
+                        // Dropping the oldest staged render also drops its file:
+                        // the cache is scratch, not a save directory.
+                        let dropped = self.gallery.remove(0);
+                        if !dropped.saved {
+                            let _ = std::fs::remove_file(&dropped.path);
+                        }
+                        if let Some(selected) = self.selected {
+                            self.selected = Some(selected.saturating_sub(1));
+                        }
                     }
                     self.selected = Some(self.gallery.len() - 1);
                     self.set_status(
                         Level::Ok,
                         format!(
-                            "saved {} ({:.1}s, {}) · {}/{}",
-                            done.path.display(),
+                            "generated {} ({:.1}s, {}) · staged, enter keeps it",
+                            display_name(&done.path),
                             done.elapsed.as_secs_f64(),
-                            human_bytes(done.bytes),
-                            self.gallery.len(),
-                            self.gallery.len()
+                            human_bytes(done.bytes)
                         ),
                     );
                     self.job = Job::Idle;
@@ -1348,7 +1661,6 @@ fn spawn_worker(
             let target = files::resolve_out_path(None, Some(&out_dir), &prompt, &out_dir);
             let path = files::prepare_path(&target)?;
             files::atomic_write(&path, &generated.bytes)?;
-            let _ = state::record(&path, &prompt);
             let image = image::load_from_memory(&generated.bytes)
                 .context("decoding the generated image")?;
             Ok(Done {
@@ -1365,6 +1677,36 @@ fn spawn_worker(
         };
         let _ = tx.send(message);
     });
+}
+
+/// Build the image-protocol picker. The kitty and iTerm2 protocols carry a real
+/// alpha channel, so transparent PNGs keep their transparency there. Half-blocks
+/// and sixels cannot, so for those we composite onto the terminal's own
+/// background colour — a transparent picture then blends in instead of showing
+/// up as a black or wrongly coloured block.
+fn terminal_picker() -> Picker {
+    let options = ratatui_image::picker::cap_parser::QueryStdioOptions {
+        terminal_background_color_osc: true,
+        ..Default::default()
+    };
+    let picker = Picker::from_query_stdio_with_options(options);
+    let mut picker = match picker {
+        Ok(picker) => picker,
+        Err(_) => Picker::halfblocks(),
+    };
+    if !protocol_keeps_alpha(picker.protocol_type()) {
+        let background = picker.capabilities().iter().find_map(|capability| {
+            if let ratatui_image::picker::Capability::Background(red, green, blue) = capability {
+                Some(image::Rgba([*red, *green, *blue, 255]))
+            } else {
+                None
+            }
+        });
+        if let Some(background) = background {
+            picker.set_background_color(Some(background));
+        }
+    }
+    picker
 }
 
 fn draw(frame: &mut Frame<'_>, app: &mut App) {
@@ -1411,6 +1753,9 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     }
     if app.settings.open {
         draw_settings(frame, app, area);
+    }
+    if app.finish.is_some() {
+        draw_finish(frame, app, area);
     }
 }
 
@@ -1464,13 +1809,22 @@ fn draw_stage(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         item.protocol = Some(app.picker.new_resize_protocol(image));
     }
     let title = match app.selected.and_then(|index| app.gallery.get(index)) {
-        Some(item) => format!(
-            " output · {} · {}/{} · {} ",
-            display_name(&item.path),
-            app.selected.unwrap_or(0) + 1,
-            app.gallery.len(),
-            human_bytes(item.bytes)
-        ),
+        Some(item) => {
+            let marker = if item.saved { "saved" } else { "unsaved" };
+            let pending = app.unsaved_count();
+            let pending_note = if pending > 1 {
+                format!(" · {pending} to decide")
+            } else {
+                String::new()
+            };
+            format!(
+                " output · {} · {}/{} · {} · {marker}{pending_note} ",
+                display_name(&item.path),
+                app.selected.unwrap_or(0) + 1,
+                app.gallery.len(),
+                human_bytes(item.bytes)
+            )
+        }
         None => " output ".to_string(),
     };
     let border = if running { Color::Yellow } else { app.accent() };
@@ -1496,9 +1850,11 @@ fn draw_stage(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     if let Some(item) = app.selected.and_then(|index| app.gallery.get_mut(index))
         && let Some(protocol) = item.protocol.as_mut()
     {
+        // Sit the image in the middle with breathing room instead of
+        // stretching it to the panel edges.
         frame.render_stateful_widget(
             StatefulImage::new().resize(Resize::Fit(None)),
-            inner,
+            inner_image_area(inner),
             protocol,
         );
         return;
@@ -1555,6 +1911,19 @@ fn draw_running_stage(
         chunks[0],
     );
     draw_snake(frame, app, chunks[1]);
+}
+
+/// Where a generated image is drawn inside the output panel: centered with a
+/// margin, so it neither touches the border nor fills every cell.
+fn inner_image_area(area: Rect) -> Rect {
+    let margin_x = (area.width / 10).clamp(2, 10);
+    let margin_y = (area.height / 12).clamp(1, 4);
+    Rect {
+        x: area.x.saturating_add(margin_x),
+        y: area.y.saturating_add(margin_y),
+        width: area.width.saturating_sub(margin_x * 2).max(1),
+        height: area.height.saturating_sub(margin_y * 2).max(1),
+    }
 }
 
 fn draw_snake(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
@@ -1865,7 +2234,16 @@ fn draw_controls(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         width: 18.min(area.width.saturating_sub(15)),
         height: 1,
     };
-    let status_x = app.hit_quality.x + app.hit_quality.width + 1;
+    app.hit_finish_button = Rect {
+        x: app.hit_quality.x + app.hit_quality.width + 1,
+        y: area.y,
+        width: 13.min(
+            area.width
+                .saturating_sub(app.hit_quality.x + app.hit_quality.width + 1),
+        ),
+        height: 1,
+    };
+    let status_x = app.hit_finish_button.x + app.hit_finish_button.width + 1;
 
     let running = matches!(app.job, Job::Running { .. });
     let label = if running {
@@ -1879,10 +2257,12 @@ fn draw_controls(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         if app.snake.focused {
             "esc pauses the game · ctrl-c quit "
         } else {
-            "esc cancels · ctrl-c quit "
+            "esc cancels · ctrl-c finish "
         }
+    } else if app.selected.is_some() {
+        "↑↓ · enter keep · ctrl-c finish "
     } else {
-        "↑↓ gallery · shift+enter newline · esc cancel · ctrl-c quit "
+        "↑↓ · ctrl-c finish "
     };
     let button_style = if running {
         Style::default().fg(Color::DarkGray)
@@ -1912,6 +2292,20 @@ fn draw_controls(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             quality_style,
         ))),
         app.hit_quality,
+    );
+
+    let finish_style = if app.hover == Some(Hit::Finish) {
+        Style::default().fg(Color::Black).bg(app.accent())
+    } else if app.unsaved_count() > 0 {
+        Style::default()
+            .fg(app.accent())
+            .add_modifier(Modifier::BOLD)
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(" [finish] ", finish_style))),
+        app.hit_finish_button,
     );
 
     let (left, style) = match &app.job {
@@ -2026,6 +2420,199 @@ fn draw_settings(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 }
 
+/// Button row of the finish screen. The second button is honest about what it
+/// does: with images already saved this session it drops the rest; with nothing
+/// saved yet it throws the lot away.
+fn finish_buttons(already_saved: usize) -> [(&'static str, FinishButton); 2] {
+    [
+        ("keep ticked", FinishButton::KeepTicked),
+        (
+            if already_saved > 0 {
+                "keep already saved"
+            } else {
+                "save nothing"
+            },
+            FinishButton::Nothing,
+        ),
+    ]
+}
+
+/// Kitty and iTerm2 carry a real alpha channel, so transparent renders stay
+/// transparent there. Everything else gets composited onto the terminal
+/// background instead of turning into a black block.
+fn protocol_keeps_alpha(protocol: ratatui_image::picker::ProtocolType) -> bool {
+    matches!(
+        protocol,
+        ratatui_image::picker::ProtocolType::Kitty | ratatui_image::picker::ProtocolType::Iterm2
+    )
+}
+
+/// One file that made it out of the session cache.
+struct SavedFile {
+    from: PathBuf,
+    to: PathBuf,
+    prompt: String,
+}
+
+struct FinishOutcome {
+    saved: Vec<SavedFile>,
+    discarded: Vec<PathBuf>,
+}
+
+/// Tick what you want to keep: the ticked files move into `out_dir` (with the
+/// usual never-overwrite naming) and everything else is deleted.
+fn apply_finish(rows: &[FinishRow], out_dir: &Path) -> FinishOutcome {
+    let mut outcome = FinishOutcome {
+        saved: Vec::new(),
+        discarded: Vec::new(),
+    };
+    for row in rows {
+        if row.keep {
+            let requested = files::resolve_out_path(None, Some(out_dir), &row.prompt, &row.path);
+            if let Ok(target) = files::prepare_path(&requested)
+                .and_then(|target| files::move_file(&row.path, &target).map(|()| target))
+            {
+                outcome.saved.push(SavedFile {
+                    from: row.path.clone(),
+                    to: target,
+                    prompt: row.prompt.clone(),
+                });
+                continue;
+            }
+            // A failed move must not turn into a silent delete.
+            continue;
+        }
+        if std::fs::remove_file(&row.path).is_ok() {
+            outcome.discarded.push(row.path.clone());
+        }
+    }
+    outcome
+}
+
+fn draw_finish(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    app.hit_finish_rows.clear();
+    app.hit_finish_buttons.clear();
+    let Some(finish) = app.finish.as_ref() else {
+        return;
+    };
+
+    let width = 74.min(area.width);
+    let rows = finish.rows.len() as u16;
+    let height = (rows + 7).min(area.height);
+    let panel = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, panel);
+    let accent = app.accent();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(accent))
+        .title(Span::styled(
+            format!(" finish · keep {}? ", rows),
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Span::styled(
+            " space tick · enter keep ticked · n keep nothing · esc stay ",
+            Style::default().fg(Color::DarkGray),
+        ));
+    let inner = block.inner(panel);
+    frame.render_widget(block, panel);
+
+    let already_saved = app.gallery.iter().filter(|item| item.saved).count();
+    let mut lines: Vec<Line> = Vec::new();
+    lines.push(Line::from(Span::styled(
+        format!(
+            " {} unsaved image(s) · kept ones move to {}",
+            rows,
+            truncate_chars(&app.out_dir.display().to_string(), 30)
+        ),
+        Style::default().fg(Color::DarkGray),
+    )));
+    if already_saved > 0 {
+        lines.push(Line::from(Span::styled(
+            format!(" {already_saved} already saved this session"),
+            Style::default().fg(Color::Green),
+        )));
+    }
+    lines.push(Line::from(""));
+
+    let list_top = inner.y + lines.len() as u16;
+    let visible = inner.height.saturating_sub(lines.len() as u16 + 2);
+    let start = if finish.selection >= usize::from(visible) {
+        finish.selection + 1 - usize::from(visible)
+    } else {
+        0
+    };
+    for (index, row) in finish
+        .rows
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(usize::from(visible))
+    {
+        let selected = index == finish.selection;
+        let tick = if row.keep { "[x]" } else { "[ ]" };
+        let label = format!(
+            " {tick} {} · {} · {}",
+            display_name(&row.path),
+            human_bytes(row.bytes),
+            truncate_chars(&row.prompt.replace('\n', " "), 40)
+        );
+        let row_area = Rect {
+            x: inner.x,
+            y: list_top + (index - start) as u16,
+            width: inner.width,
+            height: 1,
+        };
+        app.hit_finish_rows.push((row_area, index));
+        let style = if selected {
+            Style::default()
+                .fg(Color::Black)
+                .bg(app.accent())
+                .add_modifier(Modifier::BOLD)
+        } else if row.keep {
+            Style::default().fg(Color::White)
+        } else {
+            Style::default().fg(Color::DarkGray)
+        };
+        lines.push(Line::from(Span::styled(label, style)));
+    }
+    frame.render_widget(Paragraph::new(lines), inner);
+
+    // Buttons along the bottom row of the panel.
+    let buttons_y = inner.y + inner.height.saturating_sub(1);
+    let mut x = inner.x;
+    for (label, button) in finish_buttons(already_saved) {
+        let label = format!(" [{label}] ");
+        let width = label.chars().count() as u16;
+        if x + width > inner.x + inner.width {
+            break;
+        }
+        let rect = Rect {
+            x,
+            y: buttons_y,
+            width,
+            height: 1,
+        };
+        app.hit_finish_buttons.push((rect, button));
+        let style = if button == FinishButton::KeepTicked {
+            Style::default()
+                .fg(Color::Black)
+                .bg(app.accent())
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(Color::DarkGray)
+                .add_modifier(Modifier::BOLD)
+        };
+        frame.render_widget(Paragraph::new(Span::styled(label, style)), rect);
+        x += width + 1;
+    }
+}
+
 fn draw_help(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let width = 74.min(area.width);
     let height = 22.min(area.height);
@@ -2069,7 +2656,11 @@ fn draw_help(frame: &mut Frame<'_>, app: &App, area: Rect) {
     }
     lines.push(Line::from(""));
     for (key, what) in [
-        ("enter", "generate · run a /command"),
+        (
+            "enter",
+            "generate · run a /command · save the selected image",
+        ),
+        ("ctrl-c", "keep/discard checklist (again to force quit)"),
         ("shift+enter", "new line, the prompt box grows with it"),
         ("↑ ↓", "walk the generated images"),
         ("arrows", "steer the snake while it generates"),
@@ -2198,7 +2789,32 @@ pub fn run_tui(args: TuiArgs) -> Result<i32> {
     let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     ratatui::restore();
     result?;
+    report_session(&app);
     Ok(0)
+}
+
+/// What to tell the user after the TUI closes: a hard quit keeps the staged
+/// renders (losing a picture you paid a generation for is worse than a cache
+/// directory), a clean exit leaves nothing behind.
+fn session_report(forced_quit: bool, staged: usize, session_dir: &Path) -> Option<String> {
+    if staged == 0 {
+        let _ = std::fs::remove_dir(session_dir);
+        return None;
+    }
+    if forced_quit {
+        return Some(format!(
+            "left {staged} unsaved image(s) in {}",
+            session_dir.display()
+        ));
+    }
+    None
+}
+
+fn report_session(app: &App) {
+    let staged = app.unsaved_count();
+    if let Some(message) = session_report(app.forced_quit, staged, &app.session_dir) {
+        eprintln!("{message}");
+    }
 }
 
 fn is_image_file(path: &Path) -> bool {
@@ -2456,6 +3072,148 @@ mod tests {
     fn focus_toggles() {
         assert_eq!(Focus::Input.toggled(), Focus::Button);
         assert_eq!(Focus::Button.toggled(), Focus::Input);
+    }
+
+    #[test]
+    fn a_forced_quit_keeps_staged_images_and_says_where() {
+        let dir = tempfile::tempdir().unwrap();
+        let session = dir.path().join("session-1");
+        std::fs::create_dir(&session).unwrap();
+
+        // Clean exit with nothing staged: cache directory goes away, no message.
+        assert_eq!(session_report(false, 0, &session), None);
+        assert!(!session.exists());
+
+        // Forced quit with staged work: keep the files and say where they are.
+        std::fs::create_dir(&session).unwrap();
+        let message = session_report(true, 3, &session).unwrap();
+        assert!(message.contains("3 unsaved"));
+        assert!(message.contains(&session.display().to_string()));
+        assert!(session.exists(), "staged renders survive a hard quit");
+    }
+
+    #[test]
+    fn finish_buttons_name_what_they_do() {
+        let fresh = finish_buttons(0);
+        assert_eq!(fresh[0].0, "keep ticked");
+        assert_eq!(fresh[1].0, "save nothing");
+        let after_saving = finish_buttons(3);
+        assert_eq!(after_saving[1].0, "keep already saved");
+    }
+
+    #[test]
+    fn alpha_is_kept_only_where_the_protocol_can() {
+        use ratatui_image::picker::ProtocolType;
+        assert!(protocol_keeps_alpha(ProtocolType::Kitty));
+        assert!(protocol_keeps_alpha(ProtocolType::Iterm2));
+        assert!(!protocol_keeps_alpha(ProtocolType::Halfblocks));
+        assert!(!protocol_keeps_alpha(ProtocolType::Sixel));
+    }
+
+    #[test]
+    fn turning_steps_immediately() {
+        let mut game = SnakeGame::new();
+        game.resize(12, 12);
+        game.focused = true;
+        let head = game.body[0];
+        game.set_direction(SnakeDirection::Up);
+        // No sleeping: a turn must move the snake on the very next tick.
+        game.tick();
+        assert_eq!(
+            game.body[0],
+            SnakePoint {
+                x: head.x,
+                y: head.y - 1
+            }
+        );
+    }
+
+    #[test]
+    fn finish_checklist_moves_ticked_and_deletes_the_rest() {
+        let staged = tempfile::tempdir().unwrap();
+        let out = tempfile::tempdir().unwrap();
+        let make = |name: &str, body: &[u8]| {
+            let path = staged.path().join(name);
+            std::fs::write(&path, body).unwrap();
+            path
+        };
+        let keep = make("keep-me.png", b"kept");
+        let drop = make("drop-me.png", b"dropped");
+        // Same derived name as an existing file: the kept one must not clobber it.
+        let taken = out.path().join("taken.png");
+        std::fs::write(&taken, b"original").unwrap();
+        let collides = make("collides.png", b"second");
+
+        let rows = vec![
+            FinishRow {
+                path: keep.clone(),
+                prompt: "taken".to_string(),
+                bytes: 4,
+                keep: true,
+            },
+            FinishRow {
+                path: collides.clone(),
+                prompt: "taken".to_string(),
+                bytes: 6,
+                keep: true,
+            },
+            FinishRow {
+                path: drop.clone(),
+                prompt: "drop-me".to_string(),
+                bytes: 7,
+                keep: false,
+            },
+        ];
+        let outcome = apply_finish(&rows, out.path());
+
+        assert_eq!(outcome.saved.len(), 2);
+        assert_eq!(outcome.discarded, vec![drop.clone()]);
+        assert!(!keep.exists(), "kept file moved out of the cache");
+        assert!(!collides.exists());
+        assert!(!drop.exists(), "unticked file deleted");
+        assert!(staged.path().read_dir().unwrap().next().is_none());
+        assert_eq!(std::fs::read(&taken).unwrap(), b"original");
+        // The occupied name was stepped around for both, never overwritten.
+        let names: Vec<String> = outcome
+            .saved
+            .iter()
+            .map(|saved| saved.to.file_name().unwrap().to_string_lossy().into_owned())
+            .collect();
+        assert_eq!(names, vec!["taken-v2.png", "taken-v3.png"]);
+    }
+
+    #[test]
+    fn unsaved_gallery_items_become_ticked_checklist_rows() {
+        let item = |name: &str, saved: bool| GalleryItem {
+            path: PathBuf::from(name),
+            prompt: name.to_string(),
+            bytes: 1,
+            saved,
+            image: None,
+            protocol: None,
+        };
+        let gallery = [
+            item("one.png", false),
+            item("two.png", true),
+            item("three.png", false),
+        ];
+        let rows: Vec<FinishRow> = gallery
+            .iter()
+            .filter(|item| !item.saved)
+            .map(|item| FinishRow {
+                path: item.path.clone(),
+                prompt: item.prompt.clone(),
+                bytes: item.bytes,
+                keep: true,
+            })
+            .collect();
+        assert_eq!(rows.len(), 2, "already saved images are not asked about");
+        assert!(
+            rows.iter().all(|row| row.keep),
+            "everything is ticked by default"
+        );
+        assert_eq!(rows[0].path, PathBuf::from("one.png"));
+        assert_eq!(rows[1].path, PathBuf::from("three.png"));
     }
 
     #[test]

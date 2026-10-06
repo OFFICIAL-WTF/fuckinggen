@@ -33,6 +33,35 @@ fn home_from(get: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<PathBuf
     }
 }
 
+/// Where scratch files live: the TUI stages generations here until the user
+/// decides what to keep. `$XDG_CACHE_HOME/fuckinggen`, `~/.cache/fuckinggen`,
+/// or `%LOCALAPPDATA%\fuckinggen` on Windows.
+pub fn cache_dir() -> PathBuf {
+    for key in ["XDG_CACHE_HOME", "LOCALAPPDATA"] {
+        if let Some(value) = std::env::var_os(key).filter(|value| !value.is_empty()) {
+            return PathBuf::from(value).join("fuckinggen");
+        }
+    }
+    home_dir()
+        .map(|home| home.join(".cache").join("fuckinggen"))
+        .unwrap_or_else(std::env::temp_dir)
+}
+
+/// Move a file, falling back to copy+delete when the destination is on another
+/// filesystem (`rename` fails across mounts, and Windows refuses some moves).
+pub fn move_file(from: &Path, to: &Path) -> Result<()> {
+    if let Some(parent) = to.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("creating {}", parent.display()))?;
+    }
+    if std::fs::rename(from, to).is_ok() {
+        return Ok(());
+    }
+    std::fs::copy(from, to).with_context(|| format!("copying to {}", to.display()))?;
+    std::fs::remove_file(from).with_context(|| format!("removing {}", from.display()))?;
+    Ok(())
+}
+
 pub fn expand_tilde(input: &str) -> String {
     if input == "~" {
         return home_dir()

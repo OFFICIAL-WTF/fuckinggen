@@ -71,7 +71,12 @@ Interactive terminal UI. Blue accent by default; theme lives in `~/.config/fucki
 
 - Type a prompt, `enter` generates; `shift`+`enter` adds a line and the prompt box grows to fit.
 - Drag & drop or paste image paths to attach references — any number of files at once (quoted, backslash-escaped, or `file://` paths all work). Attached refs appear as previews in the `refs` strip above the prompt bar (click one to remove it). A path typed or dropped into the prompt attaches instead of generating, so a drop can never fire a stray prompt.
-- While generating, a big square snake board fills the middle of the output panel and is already listening: arrow keys steer it immediately (no click needed), the body tapers from head to tail, and crossing an edge wraps around. `Esc` pauses the game (press it again to cancel the generation instead).
+- **Follow-up edits work in the TUI.** Each prompt carries the currently selected image back to the model, so "change the cup to a cucumber" keeps the girl and edits the cup. `/ctx` toggles that carry (on by default).
+- Generated images are **staged in a session cache**, not in your folders: `~/.cache/fuckinggen/session-<pid>-<time>/`.
+- `enter` with an empty prompt = keep the image you are looking at (moves it to the save directory and records it for `--last`). `/save` and `/save-all` do the same for one/all.
+- GALLERY: `↑`/`↓` walk the session images; the title shows `index/total`, size, and `saved`/`unsaved`.
+- Quitting asks what to keep: `ctrl-c` (or the `[finish]` button) opens a checklist where `space` ticks, `enter` keeps the ticked ones, `n` keeps nothing, and `esc` returns to the work. A second `ctrl-c` while the checklist is open force-quits and leaves the staged files in the cache, printing the path.
+- While generating, a big square snake board fills the middle of the output panel and is already listening: arrow keys steer it immediately (no click needed), the body tapers from head to tail, and crossing an edge wraps around. `Esc` pauses the game.
 - Type `/` to open the command palette above the prompt bar; `↑`/`↓` pick, `tab` completes, `enter` runs.
 
 Slash commands:
@@ -80,6 +85,9 @@ Slash commands:
 |---|---|
 | `/open` | open the selected image in the system viewer |
 | `/view` | reveal it in the file manager |
+| `/save` | keep the selected image (moves it out of the session cache) |
+| `/save-all` | keep every image from this session |
+| `/ctx` | toggle handing the selected image to the next prompt |
 | `/root` | move this session's images to `~/Downloads` and save there from now on |
 | `/remove` | delete the selected image |
 | `/remove-all` | delete every image from this session |
