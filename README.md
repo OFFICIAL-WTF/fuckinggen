@@ -79,7 +79,7 @@ brew tap prophesourvolodymyr/fuckinggen
 brew install fuckinggen
 ```
 
-Both `fgen` and `fuckinggen` land in your Homebrew bin. The tap ships prebuilt binaries for macOS (arm64, x86_64) and Linux (x86_64, aarch64) — no Rust toolchain needed.
+Both `fgen` and `fuckinggen` land in your Homebrew bin. The tap builds from source and declares Rust as a build dependency, so Homebrew installs the compiler automatically.
 
 ### <img src="https://img.shields.io/badge/-Rust-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust" width="60" /> Cargo
 
@@ -91,11 +91,11 @@ Or from a checkout: `gh repo clone prophesourvolodymyr/fuckinggen && cd fuckingg
 
 ### Manual downloads
 
-Every release has tarballs per platform on the [Releases](https://github.com/prophesourvolodymyr/fuckinggen/releases) page (`fuckinggen-vX.Y.Z-<target>.tar.gz`, containing both binaries plus README and LICENSE).
+The [Releases](https://github.com/prophesourvolodymyr/fuckinggen/releases) page contains the source archive and any available prebuilt target archives (`fuckinggen-vX.Y.Z-<target>.tar.gz`, containing both binaries plus README and LICENSE).
 
 ### Linux notes
 
-- Tested on Linux x86_64 and aarch64 (see CI). Any modern terminal works.
+- The release workflow targets Linux x86_64 and aarch64; the TUI falls back to half-block rendering when the terminal has no inline-image protocol.
 - Inline image previews use whatever the terminal supports (Kitty graphics, iTerm2 inline images, Sixel, Ghostty/WezTerm) and fall back to coloured half-blocks everywhere else.
 - `/open` uses `xdg-open`; `/view` uses the `org.freedesktop.FileManager1` D-Bus interface (Nautilus, Dolphin, Nemo, Thunar) and falls back to opening the folder.
 - `codex login` works the same; the token lives in `~/.codex/auth.json`.
