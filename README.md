@@ -149,7 +149,14 @@ Every agent on this machine can learn to use it:
 ./install.sh
 ```
 
-That installs the binaries and drops the `gpt-image-gen-latest` skill into every skill directory it finds (`~/.agents/skills`, `~/.claude/skills`, `~/.codex/skills`, `~/.gemini/skills`, `~/.cursor/skills`, `~/.config/agents/skills`, `~/.aider-desk/skills`). Agents then call `fgen` themselves. From Homebrew? Grab `install.sh` and `skills/` from the repo, or just run it in a clone.
+That installs the binaries and drops the `gpt-image-gen-latest` skill into every skill directory it finds (`~/.agents/skills`, `~/.claude/skills`, `~/.codex/skills`, `~/.gemini/skills`, `~/.cursor/skills`, `~/.config/agents/skills`, `~/.aider-desk/skills`). Agents then call `fgen` themselves.
+
+Installed from a package manager? Both the AUR package and the Homebrew formula ship `install.sh` plus the skill, so you can skip the build:
+
+```bash
+sudo bash /usr/share/fgen/install.sh --skills-only                       # AUR
+bash "$(brew --prefix fuckinggen)/share/fgen/install.sh" --skills-only   # Homebrew
+```
 
 <p align="center">
   <a href="https://buymeacoffee.com/professorvolodymyr"><img src="https://img.buymeacoffee.com/button-api/?text=Buy%20me%20a%20coffee&emoji=%E2%98%95&slug=professorvolodymyr&button_colour=D4FF45&font_colour=0B28B6&font_family=Inter&outline_colour=0B28B6&coffee_colour=FFDD00" alt="Buy me a coffee" /></a>
