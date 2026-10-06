@@ -10,6 +10,7 @@
   <a href="https://github.com/prophesourvolodymyr/fuckinggen/actions/workflows/ci.yml"><img src="https://github.com/prophesourvolodymyr/fuckinggen/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
   <a href="https://github.com/prophesourvolodymyr/fuckinggen/releases"><img src="https://img.shields.io/github/v/release/prophesourvolodymyr/fuckinggen?display_name=tag&style=flat-square" alt="Latest release" /></a>
   <a href="https://github.com/prophesourvolodymyr/homebrew-fuckinggen"><img src="https://img.shields.io/badge/Homebrew-tap-FBB040?style=flat-square&logo=homebrew&logoColor=white" alt="Homebrew tap" /></a>
+  <a href="https://aur.archlinux.org/packages/fgen"><img src="https://img.shields.io/aur/version/fgen?style=flat-square&logo=archlinux&logoColor=white&label=AUR" alt="AUR package" /></a>
   <a href="https://github.com/prophesourvolodymyr/fuckinggen/blob/main/LICENSE"><img src="https://img.shields.io/github/license/prophesourvolodymyr/fuckinggen?style=flat-square" alt="WTFPL license" /></a>
   <img src="https://img.shields.io/badge/macOS-supported-000000?style=flat-square&logo=apple&logoColor=white" alt="macOS supported" />
   <img src="https://img.shields.io/badge/Linux-supported-FCC624?style=flat-square&logo=linux&logoColor=black" alt="Linux supported" />
@@ -95,6 +96,18 @@ brew install fuckinggen
 ---
 
 ## <img src="./assets/platform-linux.svg" alt="Linux" width="18" height="18" /> Linux
+
+**Arch Linux / AUR**
+
+```bash
+yay -S fgen
+```
+
+Both binaries land in `/usr/bin`. The agent skill and `install.sh` ship under `/usr/share/fgen/`, so agents can pick it up with:
+
+```bash
+sudo bash /usr/share/fgen/install.sh --skills-only
+```
 
 **Homebrew**
 

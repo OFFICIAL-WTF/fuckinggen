@@ -18,7 +18,7 @@ Binary: `fgen` (alias: `fuckinggen`). Source: `~/GSpace/Opensource/HTF/fuckingge
 
 ## Prerequisites
 
-1. `fgen` on PATH (`which fgen`). Install with Homebrew (`brew tap prophesourvolodymyr/fuckinggen && brew install fuckinggen`) or from source (`cd ~/GSpace/Opensource/HTF/fuckinggen && cargo install --path .`).
+1. `fgen` on PATH (`which fgen`). Install with Homebrew (`brew tap prophesourvolodymyr/fuckinggen && brew install fuckinggen`), from the AUR (`yay -S fgen` on Arch), or from source (`cd ~/GSpace/Opensource/HTF/fuckinggen && cargo install --path .`).
 2. Subscription login: `fgen auth` must report a valid token. If it fails, ask the user to run `codex login`, then `fgen auth` again. **Never** ask for or use an OpenAI API key.
 
 ## Commands
