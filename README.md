@@ -62,7 +62,7 @@ fgen gen "hero shot" --json
 **TUI** — `fgen -t`
 
 - Prompt box, enter to generate; `shift`+`enter` adds a line and the box grows with your text.
-- Drag & drop (or paste) an image path and it attaches as a reference — previews show up in a `refs` strip right above the prompt bar, click one to drop it.
+- Drag & drop (or paste) image paths — one or many, quoted or escaped — and they attach as references: previews show up in a `refs` strip right above the prompt bar, click one to drop it. A path never fires a generation by accident.
 - Every generation lands in a gallery: `↑`/`↓` (or `ctrl-p`/`ctrl-n`) walk through them, the panel title shows `index/total` and the file size.
 - Type `/` for the command palette above the prompt bar (arrows pick, tab completes, enter runs).
 - Saves into whatever folder you are `cd`-ed into — `/root` moves everything to `~/Downloads` instead.

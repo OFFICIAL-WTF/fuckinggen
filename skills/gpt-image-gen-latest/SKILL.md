@@ -70,7 +70,7 @@ Flags that matter:
 Interactive terminal UI. Blue accent by default; theme lives in `~/.config/fuckinggen/config.json`.
 
 - Type a prompt, `enter` generates; `shift`+`enter` adds a line and the prompt box grows to fit.
-- Drag & drop or paste an image path to attach a reference — attached refs appear as previews in the `refs` strip above the prompt bar (click one to remove it).
+- Drag & drop or paste image paths to attach references — any number of files at once (quoted, backslash-escaped, or `file://` paths all work). Attached refs appear as previews in the `refs` strip above the prompt bar (click one to remove it). A path typed or dropped into the prompt attaches instead of generating, so a drop can never fire a stray prompt.
 - Generated images stack in a gallery: `↑`/`↓` (or `ctrl-p`/`ctrl-n`) walk through them; the panel title shows `index/total` and the file size.
 - Type `/` to open the command palette above the prompt bar; `↑`/`↓` pick, `tab` completes, `enter` runs.
 

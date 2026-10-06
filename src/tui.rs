@@ -1,7 +1,7 @@
 use anyhow::{Context, Result};
 use crossterm::event::{
-    self, DisableBracketedPaste, DisableMouseCapture, EnableBracketedPaste, EnableMouseCapture,
-    Event, KeyCode, KeyEvent, KeyEventKind, KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
+    self, DisableBracketedPaste, EnableBracketedPaste, Event, KeyCode, KeyEvent, KeyEventKind,
+    KeyModifiers, MouseButton, MouseEvent, MouseEventKind,
 };
 use crossterm::execute;
 use ratatui::Frame;
@@ -12,6 +12,8 @@ use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 use ratatui_image::picker::Picker;
 use ratatui_image::protocol::StatefulProtocol;
 use ratatui_image::{Resize, StatefulImage};
+use std::io::Write as _;
+use std::panic::{AssertUnwindSafe, catch_unwind};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -160,6 +162,13 @@ enum WorkerMsg {
     Failed(String),
 }
 
+enum RefMsg {
+    Decoded {
+        path: PathBuf,
+        image: Option<image::DynamicImage>,
+    },
+}
+
 struct Done {
     path: PathBuf,
     prompt: String,
@@ -188,6 +197,8 @@ struct App {
     input: String,
     cursor: usize,
     refs: Vec<Reference>,
+    ref_tx: mpsc::Sender<RefMsg>,
+    ref_rx: mpsc::Receiver<RefMsg>,
     gallery: Vec<GalleryItem>,
     selected: Option<usize>,
     job: Job,
@@ -235,11 +246,14 @@ impl App {
         };
         let input = args.initial_prompt.unwrap_or_default();
         let cursor = input.chars().count();
+        let (ref_tx, ref_rx) = mpsc::channel();
         let mut app = App {
             picker,
             input,
             cursor,
             refs: Vec::new(),
+            ref_tx,
+            ref_rx,
             gallery: Vec::new(),
             selected: None,
             job: Job::Idle,
@@ -310,7 +324,9 @@ impl App {
                 ratatui::restore();
                 let outcome = Command::new("codex").arg("login").status();
                 *terminal = ratatui::init();
-                let _ = execute!(std::io::stdout(), EnableBracketedPaste, EnableMouseCapture);
+                let _ = execute!(std::io::stdout(), EnableBracketedPaste);
+                let _ = std::io::stdout().write_all(b"\x1b[?1000h\x1b[?1006h");
+                let _ = std::io::stdout().flush();
                 self.refresh_auth();
                 match outcome {
                     Ok(status) if status.success() => {
@@ -335,6 +351,7 @@ impl App {
                 self.refresh_auth();
             }
             self.drain_worker();
+            self.drain_ref_decodes();
         }
         Ok(())
     }
@@ -424,15 +441,22 @@ impl App {
     }
 
     fn on_paste(&mut self, text: &str) {
-        if let Some(path) = paste_reference(text) {
-            self.attach_reference(path);
+        let paths = drop_paths(text);
+        if !paths.is_empty() {
+            for path in paths {
+                self.attach_reference(path);
+            }
             return;
         }
         self.focus = Focus::Input;
         insert_text(&mut self.input, &mut self.cursor, text);
         self.refresh_palette();
+        self.promote_input_paths();
     }
 
+    /// Attach a reference immediately; decoding happens on a worker thread so a
+    /// slow disk (iCloud, network shares) or a 30-megapixel drag can never
+    /// freeze the UI.
     fn attach_reference(&mut self, path: PathBuf) {
         if self.refs.iter().any(|item| item.path == path) {
             self.set_status(
@@ -441,19 +465,54 @@ impl App {
             );
             return;
         }
-        let image = std::fs::read(&path)
-            .ok()
-            .and_then(|bytes| image::load_from_memory(&bytes).ok());
-        let decoded = image.is_some();
         self.refs.push(Reference {
             path: path.clone(),
-            image,
+            image: None,
             protocol: None,
         });
-        self.set_status(
-            if decoded { Level::Ok } else { Level::Info },
-            format!("attached {}", display_name(&path)),
-        );
+        self.set_status(Level::Ok, format!("attached {}", display_name(&path)));
+        let tx = self.ref_tx.clone();
+        std::thread::spawn(move || {
+            let source = path.clone();
+            let decoded = catch_unwind(AssertUnwindSafe(move || {
+                let bytes = std::fs::read(&source).ok()?;
+                let image = image::load_from_memory(&bytes).ok()?;
+                // Thumbnails never need the full resolution; shrinking here keeps
+                // rendering cheap and memory bounded.
+                Some(image.thumbnail(1024, 1024))
+            }))
+            .ok()
+            .flatten();
+            let _ = tx.send(RefMsg::Decoded {
+                path: path.clone(),
+                image: decoded,
+            });
+        });
+    }
+
+    fn drain_ref_decodes(&mut self) {
+        while let Ok(RefMsg::Decoded { path, image }) = self.ref_rx.try_recv() {
+            if let Some(item) = self.refs.iter_mut().find(|item| item.path == path)
+                && item.image.is_none()
+            {
+                item.image = image;
+            }
+        }
+    }
+
+    /// A path typed or dropped straight into the prompt becomes a reference
+    /// instead of a prompt that happens to look like a path.
+    fn promote_input_paths(&mut self) -> bool {
+        let Some(paths) = input_paths(&self.input) else {
+            return false;
+        };
+        self.input.clear();
+        self.cursor = 0;
+        self.refresh_palette();
+        for path in paths {
+            self.attach_reference(path);
+        }
+        true
     }
 
     fn remove_reference(&mut self, index: usize) {
@@ -573,7 +632,9 @@ impl App {
                 self.focus = self.focus.toggled();
             }
             (KeyCode::Enter, _) => {
-                if self.is_command_line() {
+                if self.promote_input_paths() {
+                    // the prompt was a path; it attached as a reference instead
+                } else if self.is_command_line() {
                     let token = self
                         .input
                         .split_whitespace()
@@ -603,7 +664,9 @@ impl App {
                     self.submit();
                 }
             }
-            (KeyCode::Char(' '), KeyModifiers::NONE) if self.focus == Focus::Button => {
+            (KeyCode::Char(' '), KeyModifiers::NONE)
+                if self.focus == Focus::Button && self.input.is_empty() =>
+            {
                 self.submit()
             }
             (KeyCode::Backspace, _) => {
@@ -699,7 +762,7 @@ impl App {
     }
 
     fn is_command_line(&self) -> bool {
-        self.input.trim_start().starts_with('/')
+        command_token(&self.input).is_some()
     }
 
     fn select_gallery(&mut self, delta: i32) {
@@ -927,7 +990,7 @@ impl App {
                         path: done.path.clone(),
                         prompt: done.prompt.clone(),
                         bytes: done.bytes,
-                        image: Some(done.image),
+                        image: Some(done.image.thumbnail(2048, 2048)),
                         protocol: None,
                     });
                     if self.gallery.len() > MAX_GALLERY {
@@ -1680,6 +1743,19 @@ fn hit_test_static(button: Rect, quality: Rect, input: Rect, column: u16, row: u
     None
 }
 
+/// `Some(token)` only when the token really is a command prefix. Absolute paths
+/// start with `/` too, and must never be mistaken for commands.
+fn command_token(input: &str) -> Option<&str> {
+    let token = input.split_whitespace().next()?;
+    if !token.starts_with('/') {
+        return None;
+    }
+    COMMANDS
+        .iter()
+        .any(|spec| spec.name.starts_with(token))
+        .then_some(token)
+}
+
 fn next_selection(len: usize, current: Option<usize>, delta: i32) -> Option<usize> {
     if len == 0 {
         return None;
@@ -1734,31 +1810,71 @@ fn is_newline_modifier(modifiers: KeyModifiers) -> bool {
 pub fn run_tui(args: TuiArgs) -> Result<i32> {
     let mut app = App::new(args)?;
     let mut terminal = ratatui::init();
-    let _ = execute!(std::io::stdout(), EnableBracketedPaste, EnableMouseCapture);
+    let _ = execute!(std::io::stdout(), EnableBracketedPaste);
+    // Click-only mouse tracking (X10 + SGR). Any-motion mode is deliberately
+    // left off: with it enabled macOS terminals route a Finder drag to the app
+    // as mouse events and the dropped file path never arrives.
+    let _ = std::io::stdout().write_all(b"\x1b[?1000h\x1b[?1006h");
+    let _ = std::io::stdout().flush();
     let result = app.run(&mut terminal);
-    let _ = execute!(
-        std::io::stdout(),
-        DisableMouseCapture,
-        DisableBracketedPaste
-    );
+    let _ = std::io::stdout().write_all(b"\x1b[?1006l\x1b[?1000l");
+    let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     ratatui::restore();
     result?;
     Ok(0)
 }
 
-fn paste_reference(text: &str) -> Option<PathBuf> {
-    let trimmed = text.trim();
-    if trimmed.is_empty() || trimmed.contains('\n') {
+fn is_image_file(path: &Path) -> bool {
+    let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+        return false;
+    };
+    let name = name.to_ascii_lowercase();
+    [".png", ".jpg", ".jpeg", ".webp", ".gif"]
+        .iter()
+        .any(|extension| name.ends_with(extension))
+        && path.is_file()
+}
+
+/// Turn dropped or typed text into image paths. Covers what Finder drags look
+/// like in macOS terminals: backslash-escaped spaces, single or double quotes,
+/// `file://` URLs, and multi-file drops separated by newlines.
+fn drop_paths(text: &str) -> Vec<PathBuf> {
+    let mut paths = Vec::new();
+    for raw_line in text.split(['\n', '\r']) {
+        let line = raw_line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let unquoted = line.trim_matches(|c| c == '\'' || c == '"');
+        let unescaped = unquoted
+            .replace("\\ ", " ")
+            .replace("\\'", "'")
+            .replace("\\\"", "\"");
+        let candidate = unescaped
+            .strip_prefix("file://")
+            .unwrap_or(unescaped.as_str());
+        let path = PathBuf::from(files::expand_tilde(
+            candidate.trim_matches(|c| c == '\'' || c == '"'),
+        ));
+        if is_image_file(&path) && !paths.contains(&path) {
+            paths.push(path);
+        }
+    }
+    paths
+}
+
+/// True when the whole input is nothing but image paths.
+fn input_paths(input: &str) -> Option<Vec<PathBuf>> {
+    let lines = input
+        .split(['\n', '\r'])
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .count();
+    if lines == 0 {
         return None;
     }
-    let unquoted = trimmed.trim_matches(|c| c == '\'' || c == '"');
-    let unescaped = unquoted.replace("\\ ", " ");
-    let path = PathBuf::from(files::expand_tilde(&unescaped));
-    let name = path.file_name()?.to_str()?.to_ascii_lowercase();
-    let is_image = [".png", ".jpg", ".jpeg", ".webp", ".gif"]
-        .iter()
-        .any(|extension| name.ends_with(extension));
-    (is_image && path.is_file()).then_some(path)
+    let paths = drop_paths(input);
+    (paths.len() == lines).then_some(paths)
 }
 
 fn display_name(path: &Path) -> String {
@@ -1848,25 +1964,45 @@ mod tests {
     use super::*;
 
     #[test]
-    fn paste_detects_image_paths() {
+    fn drop_paths_handles_every_terminal_flavour() {
         let tmp = tempfile::tempdir().unwrap();
         let image = tmp.path().join("ref image.png");
         std::fs::write(&image, [0x89, b'P', b'N', b'G']).unwrap();
+        let raw = image.to_str().unwrap();
+
+        assert_eq!(drop_paths(raw), vec![image.clone()]);
+        assert_eq!(drop_paths(&raw.replace(' ', "\\ ")), vec![image.clone()]);
+        assert_eq!(drop_paths(&format!("'{raw}'")), vec![image.clone()]);
+        assert_eq!(drop_paths(&format!("\"{raw}\"")), vec![image.clone()]);
+        assert_eq!(drop_paths(&format!("file://{raw}")), vec![image.clone()]);
+
+        let second = tmp.path().join("another.png");
+        std::fs::write(&second, [0x89, b'P', b'N', b'G']).unwrap();
         assert_eq!(
-            paste_reference(image.to_str().unwrap()),
-            Some(image.clone())
-        );
-        let escaped = image.to_str().unwrap().replace(' ', "\\ ");
-        assert_eq!(paste_reference(&escaped), Some(image.clone()));
-        assert_eq!(
-            paste_reference(&format!("\"{}\"", image.display())),
-            Some(image)
+            drop_paths(&format!("{raw}\n{}", second.display())),
+            vec![image.clone(), second.clone()]
         );
 
         let text_file = tmp.path().join("notes.txt");
         std::fs::write(&text_file, b"hello").unwrap();
-        assert_eq!(paste_reference(text_file.to_str().unwrap()), None);
-        assert_eq!(paste_reference("just some text"), None);
+        assert!(drop_paths(text_file.to_str().unwrap()).is_empty());
+        assert!(drop_paths("just some text").is_empty());
+    }
+
+    #[test]
+    fn input_paths_only_promotes_pure_paths() {
+        let tmp = tempfile::tempdir().unwrap();
+        let image = tmp.path().join("cat.png");
+        std::fs::write(&image, [0x89, b'P', b'N', b'G']).unwrap();
+        assert_eq!(
+            input_paths(image.to_str().unwrap()),
+            Some(vec![image.clone()])
+        );
+        assert_eq!(
+            input_paths(&format!("make it blue {}", image.display())),
+            None
+        );
+        assert_eq!(input_paths(""), None);
     }
 
     #[test]
@@ -1943,6 +2079,18 @@ mod tests {
     fn focus_toggles() {
         assert_eq!(Focus::Input.toggled(), Focus::Button);
         assert_eq!(Focus::Button.toggled(), Focus::Input);
+    }
+
+    #[test]
+    fn command_token_ignores_paths() {
+        assert_eq!(command_token("/"), Some("/"));
+        assert_eq!(command_token("/open"), Some("/open"));
+        assert_eq!(command_token("/remov"), Some("/remov"));
+        assert_eq!(command_token("/quality low"), Some("/quality"));
+        assert_eq!(command_token("/tmp/drop\\ test/tabby.png"), None);
+        assert_eq!(command_token("/Users/me/image.png"), None);
+        assert_eq!(command_token("/frobnicate"), None);
+        assert_eq!(command_token("make it blue"), None);
     }
 
     #[test]
