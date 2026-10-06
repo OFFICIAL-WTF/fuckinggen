@@ -33,7 +33,7 @@ const MAX_GALLERY: usize = 16;
 const AUTH_REFRESH_TICKS: u64 = 40;
 const SPINNER: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 const QUALITIES: [&str; 4] = ["low", "medium", "high", "auto"];
-const THEMES: [(&str, Color); 7] = [
+const THEMES: [(&str, Color); 8] = [
     ("blue", Color::Blue),
     ("lightblue", Color::LightBlue),
     ("cyan", Color::Cyan),
@@ -41,6 +41,7 @@ const THEMES: [(&str, Color); 7] = [
     ("green", Color::Green),
     ("yellow", Color::Yellow),
     ("white", Color::White),
+    ("system", Color::Reset),
 ];
 
 struct CommandSpec {
@@ -53,12 +54,12 @@ const COMMANDS: &[CommandSpec] = &[
     CommandSpec {
         name: "/open",
         args: "",
-        description: "open the selected image in Preview",
+        description: "open the selected image in the system viewer",
     },
     CommandSpec {
         name: "/view",
         args: "",
-        description: "reveal the selected image in Finder",
+        description: "reveal the selected image in the file manager",
     },
     CommandSpec {
         name: "/root",
@@ -129,6 +130,7 @@ enum Hit {
     Quality,
     Palette(usize),
     Reference(usize),
+    Snake,
     SettingsRow(usize),
 }
 
@@ -192,6 +194,173 @@ struct Settings {
 
 const SETTINGS_ROWS: usize = 6;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct SnakePoint {
+    x: u16,
+    y: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SnakeDirection {
+    Up,
+    Down,
+    Left,
+    Right,
+}
+
+impl SnakeDirection {
+    fn opposite(self) -> Self {
+        match self {
+            Self::Up => Self::Down,
+            Self::Down => Self::Up,
+            Self::Left => Self::Right,
+            Self::Right => Self::Left,
+        }
+    }
+}
+
+const SNAKE_STEP: Duration = Duration::from_millis(180);
+
+struct SnakeGame {
+    width: u16,
+    height: u16,
+    body: Vec<SnakePoint>,
+    food: SnakePoint,
+    direction: SnakeDirection,
+    queued_direction: Option<SnakeDirection>,
+    food_seed: u64,
+    last_step: Instant,
+    focused: bool,
+    score: u32,
+}
+
+impl SnakeGame {
+    fn new() -> Self {
+        Self {
+            width: 0,
+            height: 0,
+            body: Vec::new(),
+            food: SnakePoint { x: 0, y: 0 },
+            direction: SnakeDirection::Right,
+            queued_direction: None,
+            food_seed: 1,
+            last_step: Instant::now(),
+            focused: false,
+            score: 0,
+        }
+    }
+
+    fn resize(&mut self, width: u16, height: u16) {
+        let width = width.max(4);
+        let height = height.max(3);
+        if self.width == width && self.height == height && !self.body.is_empty() {
+            return;
+        }
+        self.width = width;
+        self.height = height;
+        self.reset();
+        self.place_food();
+    }
+
+    fn reset(&mut self) {
+        let center = SnakePoint {
+            x: self.width / 2,
+            y: self.height / 2,
+        };
+        let length = 4.min(usize::from(self.width));
+        self.body = (0..length)
+            .map(|offset| SnakePoint {
+                x: (i32::from(center.x) - offset as i32).rem_euclid(i32::from(self.width)) as u16,
+                y: center.y,
+            })
+            .collect();
+        self.direction = SnakeDirection::Right;
+        self.queued_direction = None;
+        self.score = 0;
+    }
+
+    fn activate(&mut self) {
+        self.focused = true;
+        self.last_step = Instant::now();
+    }
+
+    fn deactivate(&mut self) {
+        self.focused = false;
+    }
+
+    fn set_direction(&mut self, direction: SnakeDirection) {
+        if self.body.len() > 1 && direction == self.direction.opposite() {
+            return;
+        }
+        self.queued_direction = Some(direction);
+    }
+
+    fn tick(&mut self) {
+        if !self.focused || self.last_step.elapsed() < SNAKE_STEP {
+            return;
+        }
+        self.last_step = Instant::now();
+        self.step();
+    }
+
+    fn step(&mut self) {
+        if !self.focused || self.width == 0 || self.height == 0 {
+            return;
+        }
+        if let Some(direction) = self.queued_direction.take()
+            && (self.body.len() <= 1 || direction != self.direction.opposite())
+        {
+            self.direction = direction;
+        }
+        let head = self.body[0];
+        let (dx, dy) = match self.direction {
+            SnakeDirection::Up => (0, -1),
+            SnakeDirection::Down => (0, 1),
+            SnakeDirection::Left => (-1, 0),
+            SnakeDirection::Right => (1, 0),
+        };
+        let next = SnakePoint {
+            x: (i32::from(head.x) + dx).rem_euclid(i32::from(self.width)) as u16,
+            y: (i32::from(head.y) + dy).rem_euclid(i32::from(self.height)) as u16,
+        };
+        let eats = next == self.food;
+        let collision_end = if eats {
+            self.body.len()
+        } else {
+            self.body.len().saturating_sub(1)
+        };
+        if self.body[..collision_end].contains(&next) {
+            self.reset();
+            self.place_food();
+            return;
+        }
+        self.body.insert(0, next);
+        if eats {
+            self.score = self.score.saturating_add(1);
+            self.place_food();
+        } else {
+            self.body.pop();
+        }
+    }
+
+    fn place_food(&mut self) {
+        let cells = u64::from(self.width) * u64::from(self.height);
+        for offset in 0..cells {
+            let index = (self.food_seed + offset) % cells;
+            let point = SnakePoint {
+                x: (index % u64::from(self.width)) as u16,
+                y: (index / u64::from(self.width)) as u16,
+            };
+            if !self.body.contains(&point) {
+                self.food = point;
+                self.food_seed = index.wrapping_add(17);
+                return;
+            }
+        }
+        self.food = self.body[0];
+    }
+}
+
 struct App {
     picker: Picker,
     input: String,
@@ -211,12 +380,14 @@ struct App {
     config: Config,
     focus: Focus,
     hover: Option<Hit>,
+    snake: SnakeGame,
     hit_input: Rect,
     hit_button: Rect,
     hit_quality: Rect,
     hit_palette: Vec<(Rect, usize)>,
     hit_refs: Vec<(Rect, usize)>,
     hit_settings: Vec<(Rect, usize)>,
+    snake_area: Rect,
     palette: Vec<usize>,
     palette_selection: usize,
     settings: Settings,
@@ -265,6 +436,7 @@ impl App {
             accent,
             config,
             focus: Focus::Input,
+            snake: SnakeGame::new(),
             hover: None,
             hit_input: Rect::default(),
             hit_button: Rect::default(),
@@ -272,6 +444,7 @@ impl App {
             hit_palette: Vec::new(),
             hit_refs: Vec::new(),
             hit_settings: Vec::new(),
+            snake_area: Rect::default(),
             palette: Vec::new(),
             palette_selection: 0,
             settings: Settings::default(),
@@ -337,6 +510,11 @@ impl App {
                     }
                 }
             }
+            if matches!(self.job, Job::Running { .. }) {
+                self.snake.tick();
+            } else {
+                self.snake.deactivate();
+            }
             terminal.draw(|frame| draw(frame, self))?;
             if event::poll(TICK)? {
                 match event::read()? {
@@ -389,6 +567,9 @@ impl App {
                 return Some(Hit::Reference(*index));
             }
         }
+        if self.snake_area.contains(position) {
+            return Some(Hit::Snake);
+        }
         if self.hit_button.contains(position) {
             return Some(Hit::Button);
         }
@@ -429,6 +610,10 @@ impl App {
                         self.complete_palette();
                     }
                     Some(Hit::Reference(index)) => self.remove_reference(index),
+                    Some(Hit::Snake) => {
+                        self.snake.activate();
+                        self.set_status(Level::Info, "snake · arrows move · edges wrap");
+                    }
                     Some(Hit::SettingsRow(index)) => {
                         self.settings.selection = index;
                         self.activate_setting();
@@ -579,6 +764,20 @@ impl App {
             self.on_settings_key(key);
             return;
         }
+        if self.snake.focused && self.snake_area.width > 0 && key.modifiers == KeyModifiers::NONE {
+            let direction = match key.code {
+                KeyCode::Up => Some(SnakeDirection::Up),
+                KeyCode::Down => Some(SnakeDirection::Down),
+                KeyCode::Left => Some(SnakeDirection::Left),
+                KeyCode::Right => Some(SnakeDirection::Right),
+                _ => None,
+            };
+            if let Some(direction) = direction {
+                self.snake.set_direction(direction);
+                return;
+            }
+        }
+
         let palette_open = !self.palette.is_empty();
         match (key.code, key.modifiers) {
             (KeyCode::Char('c'), KeyModifiers::CONTROL)
@@ -608,7 +807,11 @@ impl App {
                 self.refresh_palette();
             }
             (KeyCode::Esc, _) => {
-                if let Job::Running { cancel, .. } = &self.job {
+                if self.snake.focused {
+                    self.snake.deactivate();
+                    self.focus = Focus::Input;
+                    self.set_status(Level::Info, "snake paused");
+                } else if let Job::Running { cancel, .. } = &self.job {
                     cancel.store(true, Ordering::Relaxed);
                     self.set_status(Level::Info, "cancelling…");
                 } else {
@@ -855,7 +1058,18 @@ impl App {
             } else {
                 path.clone()
             };
-            Command::new("xdg-open").arg(&target).spawn()
+            // Most Linux desktop file managers implement the FileManager1
+            // interface, which gives a real "reveal the file" behaviour;
+            // xdg-open can only open the folder.
+            if in_finder {
+                let uri = format!("file://{}", path.display());
+                Command::new("dbus-send")
+                    .args(file_manager_args(&uri))
+                    .spawn()
+                    .or_else(|_| Command::new("xdg-open").arg(&target).spawn())
+            } else {
+                Command::new("xdg-open").arg(&target).spawn()
+            }
         };
         match outcome {
             Ok(_) => {
@@ -1193,8 +1407,8 @@ fn badge(connected: bool, note: &str) -> (Color, String) {
 
 fn draw_stage(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let running = matches!(app.job, Job::Running { .. });
-    let item = app.selected.and_then(|index| app.gallery.get_mut(index));
-    if let Some(item) = item
+    if !running
+        && let Some(item) = app.selected.and_then(|index| app.gallery.get_mut(index))
         && item.protocol.is_none()
         && let Some(image) = item.image.take()
     {
@@ -1221,6 +1435,15 @@ fn draw_stage(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let inner = block.inner(area);
     frame.render_widget(block, area);
 
+    if running {
+        let (phase, elapsed) = match &app.job {
+            Job::Running { started, phase, .. } => (*phase, started.elapsed()),
+            Job::Idle => return,
+        };
+        draw_running_stage(frame, app, inner, &phase, elapsed);
+        return;
+    }
+
     if let Some(item) = app.selected.and_then(|index| app.gallery.get_mut(index))
         && let Some(protocol) = item.protocol.as_mut()
     {
@@ -1232,17 +1455,8 @@ fn draw_stage(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         return;
     }
 
-    if let Job::Running { started, phase, .. } = &app.job {
-        let lines = marquee_lines(
-            inner.width,
-            app.tick,
-            phase,
-            started.elapsed(),
-            app.accent(),
-        );
-        frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
-        return;
-    }
+    app.snake_area = Rect::default();
+    app.snake.deactivate();
 
     let placeholder = vec![
         Line::from(""),
@@ -1264,6 +1478,95 @@ fn draw_stage(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         Paragraph::new(placeholder).alignment(Alignment::Center),
         inner,
     );
+}
+
+fn draw_running_stage(
+    frame: &mut Frame<'_>,
+    app: &mut App,
+    area: Rect,
+    phase: &Phase,
+    elapsed: Duration,
+) {
+    let game_height = 8.min(area.height.saturating_sub(5));
+    if game_height < 5 {
+        app.snake_area = Rect::default();
+        app.snake.deactivate();
+        let lines = marquee_lines(area.width, app.tick, phase, elapsed, app.accent());
+        frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), area);
+        return;
+    }
+
+    let chunks =
+        Layout::vertical([Constraint::Min(5), Constraint::Length(game_height)]).split(area);
+    let lines = marquee_lines(chunks[0].width, app.tick, phase, elapsed, app.accent());
+    frame.render_widget(
+        Paragraph::new(lines).alignment(Alignment::Center),
+        chunks[0],
+    );
+    draw_snake(frame, app, chunks[1]);
+}
+
+fn draw_snake(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let panel_width = area.width.min(52);
+    let panel_height = area.height.min(9);
+    if panel_width < 12 || panel_height < 5 {
+        app.snake_area = Rect::default();
+        app.snake.deactivate();
+        return;
+    }
+
+    let panel = Rect {
+        x: area.x + area.width.saturating_sub(panel_width) / 2,
+        y: area.y + area.height.saturating_sub(panel_height),
+        width: panel_width,
+        height: panel_height,
+    };
+    app.snake_area = panel;
+    let focused = app.snake.focused;
+    let accent = app.accent();
+    let title = if focused {
+        format!(" snake · {} · arrows · wrap ", app.snake.score)
+    } else {
+        " snake · click to play · wrap ".to_string()
+    };
+    let border = if focused { accent } else { Color::DarkGray };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(border))
+        .title(Span::styled(
+            title,
+            Style::default().fg(border).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(panel);
+    frame.render_widget(block, panel);
+
+    let columns = (inner.width / 2).max(1);
+    let rows = inner.height.max(1);
+    app.snake.resize(columns, rows);
+    let snake = &app.snake;
+    let head = snake.body.first().copied();
+    let mut lines = Vec::with_capacity(usize::from(rows));
+    for y in 0..rows {
+        let mut spans = Vec::with_capacity(usize::from(columns));
+        for x in 0..columns {
+            let point = SnakePoint { x, y };
+            let (glyph, style) = if head == Some(point) {
+                (
+                    "● ",
+                    Style::default().fg(accent).add_modifier(Modifier::BOLD),
+                )
+            } else if snake.body.contains(&point) {
+                ("● ", Style::default().fg(Color::White))
+            } else if snake.food == point {
+                ("◆ ", Style::default().fg(Color::Yellow))
+            } else {
+                ("· ", Style::default().fg(Color::DarkGray))
+            };
+            spans.push(Span::styled(glyph, style));
+        }
+        lines.push(Line::from(spans));
+    }
+    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
 }
 
 fn marquee_lines<'a>(
@@ -1743,6 +2046,22 @@ fn hit_test_static(button: Rect, quality: Rect, input: Rect, column: u16, row: u
     None
 }
 
+/// `dbus-send` arguments for `org.freedesktop.FileManager1.ShowItems`, the
+/// Linux implementation of "reveal in the file manager". It is compiled only
+/// on Linux-like targets, where this command is used.
+#[cfg(not(target_os = "macos"))]
+fn file_manager_args(uri: &str) -> Vec<String> {
+    vec![
+        "--session".to_string(),
+        "--dest=org.freedesktop.FileManager1".to_string(),
+        "--type=method_call".to_string(),
+        "/org/freedesktop/FileManager1".to_string(),
+        "org.freedesktop.FileManager1.ShowItems".to_string(),
+        format!("array:string:{uri}"),
+        "string:".to_string(),
+    ]
+}
+
 /// `Some(token)` only when the token really is a command prefix. Absolute paths
 /// start with `/` too, and must never be mistaken for commands.
 fn command_token(input: &str) -> Option<&str> {
@@ -2079,6 +2398,46 @@ mod tests {
     fn focus_toggles() {
         assert_eq!(Focus::Input.toggled(), Focus::Button);
         assert_eq!(Focus::Button.toggled(), Focus::Input);
+    }
+
+    #[test]
+    fn snake_wraps_at_every_board_edge() {
+        let mut game = SnakeGame::new();
+        game.resize(8, 4);
+        game.focused = true;
+        game.body = vec![SnakePoint { x: 0, y: 1 }, SnakePoint { x: 1, y: 1 }];
+        game.food = SnakePoint { x: 4, y: 3 };
+        game.direction = SnakeDirection::Left;
+        game.step();
+        assert_eq!(game.body[0], SnakePoint { x: 7, y: 1 });
+
+        game.body = vec![SnakePoint { x: 2, y: 0 }, SnakePoint { x: 2, y: 1 }];
+        game.food = SnakePoint { x: 4, y: 3 };
+        game.direction = SnakeDirection::Up;
+        game.step();
+        assert_eq!(game.body[0], SnakePoint { x: 2, y: 3 });
+    }
+
+    #[test]
+    fn snake_rejects_immediate_reverse() {
+        let mut game = SnakeGame::new();
+        game.resize(8, 4);
+        game.focused = true;
+        game.body = vec![SnakePoint { x: 3, y: 1 }, SnakePoint { x: 2, y: 1 }];
+        game.food = SnakePoint { x: 7, y: 3 };
+        game.direction = SnakeDirection::Right;
+        game.set_direction(SnakeDirection::Left);
+        game.step();
+        assert_eq!(game.body[0], SnakePoint { x: 4, y: 1 });
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    #[test]
+    fn file_manager_args_reveal_the_file() {
+        let args = file_manager_args("file:///tmp/out/img.png");
+        assert_eq!(args[1], "--dest=org.freedesktop.FileManager1");
+        assert_eq!(args[4], "org.freedesktop.FileManager1.ShowItems");
+        assert_eq!(args[5], "array:string:file:///tmp/out/img.png");
     }
 
     #[test]

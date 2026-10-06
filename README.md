@@ -64,25 +64,41 @@ fgen gen "hero shot" --json
 - Prompt box, enter to generate; `shift`+`enter` adds a line and the box grows with your text.
 - Drag & drop (or paste) image paths — one or many, quoted or escaped — and they attach as references: previews show up in a `refs` strip right above the prompt bar, click one to drop it. A path never fires a generation by accident.
 - Every generation lands in a gallery: `↑`/`↓` (or `ctrl-p`/`ctrl-n`) walk through them, the panel title shows `index/total` and the file size.
-- Type `/` for the command palette above the prompt bar (arrows pick, tab completes, enter runs).
+- While an image is generating, a small snake board appears below the progress bar: click it, then use the arrow keys; crossing an edge wraps to the opposite side.
 - Saves into whatever folder you are `cd`-ed into — `/root` moves everything to `~/Downloads` instead.
 - Blue by default; `/settings` cycles the theme, flips quality, and logs you into Codex.
 
-Slash commands: `/open` (Preview) · `/view` (Finder) · `/root` · `/remove` · `/remove-all` · `/quality` · `/dir` · `/settings` · `/help` · `/clear` · `/quit`
+Slash commands: `/open` (system image viewer) · `/view` (reveal in the file manager) · `/root` · `/remove` · `/remove-all` · `/quality` · `/dir` · `/settings` · `/help` · `/clear` · `/quit`
 
 ## Install
 
-### <img src="https://img.shields.io/badge/-Rust-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust" width="60" /> From source (macOS, Linux, Windows)
+### <img src="https://img.shields.io/badge/-Homebrew-FBB040?style=flat-square&logo=homebrew&logoColor=white" alt="Homebrew" width="110" /> Homebrew (macOS and Linux)
 
 ```bash
-gh repo clone prophesourvolodymyr/fuckinggen
-cd fuckinggen
-cargo install --path .
+brew tap prophesourvolodymyr/fuckinggen
+brew install fuckinggen
 ```
 
-That gives you both `fgen` and `fuckinggen` in `~/.cargo/bin`.
+Both `fgen` and `fuckinggen` land in your Homebrew bin. The tap ships prebuilt binaries for macOS (arm64, x86_64) and Linux (x86_64, aarch64) — no Rust toolchain needed.
 
-Prebuilt releases and a Homebrew tap are coming. The logo is coming too — somebody is drawing it.
+### <img src="https://img.shields.io/badge/-Rust-000000?style=flat-square&logo=rust&logoColor=white" alt="Rust" width="60" /> Cargo
+
+```bash
+cargo install --git https://github.com/prophesourvolodymyr/fuckinggen
+```
+
+Or from a checkout: `gh repo clone prophesourvolodymyr/fuckinggen && cd fuckinggen && cargo install --path .` — puts both binaries in `~/.cargo/bin`.
+
+### Manual downloads
+
+Every release has tarballs per platform on the [Releases](https://github.com/prophesourvolodymyr/fuckinggen/releases) page (`fuckinggen-vX.Y.Z-<target>.tar.gz`, containing both binaries plus README and LICENSE).
+
+### Linux notes
+
+- Tested on Linux x86_64 and aarch64 (see CI). Any modern terminal works.
+- Inline image previews use whatever the terminal supports (Kitty graphics, iTerm2 inline images, Sixel, Ghostty/WezTerm) and fall back to coloured half-blocks everywhere else.
+- `/open` uses `xdg-open`; `/view` uses the `org.freedesktop.FileManager1` D-Bus interface (Nautilus, Dolphin, Nemo, Thunar) and falls back to opening the folder.
+- `codex login` works the same; the token lives in `~/.codex/auth.json`.
 
 ### Auth (once)
 
@@ -101,7 +117,7 @@ Every agent on this machine can learn to use it:
 ./install.sh
 ```
 
-That installs the binaries and drops the `gpt-image-gen-latest` skill into every skill directory it finds (`~/.agents/skills`, `~/.claude/skills`, `~/.codex/skills`, `~/.gemini/skills`, `~/.cursor/skills`, `~/.config/agents/skills`, `~/.aider-desk/skills`). Agents then call `fgen` themselves.
+That installs the binaries and drops the `gpt-image-gen-latest` skill into every skill directory it finds (`~/.agents/skills`, `~/.claude/skills`, `~/.codex/skills`, `~/.gemini/skills`, `~/.cursor/skills`, `~/.config/agents/skills`, `~/.aider-desk/skills`). Agents then call `fgen` themselves. (Homebrew users: grab `install.sh` and `skills/` from the repo, or just run it from a clone.)
 
 ## Use
 

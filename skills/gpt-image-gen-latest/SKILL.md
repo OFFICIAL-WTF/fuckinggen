@@ -18,7 +18,7 @@ Binary: `fgen` (alias: `fuckinggen`). Source: `~/GSpace/Opensource/HTF/fuckingge
 
 ## Prerequisites
 
-1. `fgen` on PATH (`which fgen`). If missing: `cd ~/GSpace/Opensource/HTF/fuckinggen && cargo install --path .`
+1. `fgen` on PATH (`which fgen`). Install with Homebrew (`brew tap prophesourvolodymyr/fuckinggen && brew install fuckinggen`) or from source (`cd ~/GSpace/Opensource/HTF/fuckinggen && cargo install --path .`).
 2. Subscription login: `fgen auth` must report a valid token. If it fails, ask the user to run `codex login`, then `fgen auth` again. **Never** ask for or use an OpenAI API key.
 
 ## Commands
@@ -71,15 +71,15 @@ Interactive terminal UI. Blue accent by default; theme lives in `~/.config/fucki
 
 - Type a prompt, `enter` generates; `shift`+`enter` adds a line and the prompt box grows to fit.
 - Drag & drop or paste image paths to attach references — any number of files at once (quoted, backslash-escaped, or `file://` paths all work). Attached refs appear as previews in the `refs` strip above the prompt bar (click one to remove it). A path typed or dropped into the prompt attaches instead of generating, so a drop can never fire a stray prompt.
-- Generated images stack in a gallery: `↑`/`↓` (or `ctrl-p`/`ctrl-n`) walk through them; the panel title shows `index/total` and the file size.
+- While generating, a small snake board sits below the progress bar. Click it to focus, use arrow keys to steer, and rely on edge wraparound; `Esc` pauses the game without cancelling generation.
 - Type `/` to open the command palette above the prompt bar; `↑`/`↓` pick, `tab` completes, `enter` runs.
 
 Slash commands:
 
 | Command | Does |
 |---|---|
-| `/open` | open the selected image in Preview |
-| `/view` | reveal it in Finder |
+| `/open` | open the selected image in the system viewer |
+| `/view` | reveal it in the file manager |
 | `/root` | move this session's images to `~/Downloads` and save there from now on |
 | `/remove` | delete the selected image |
 | `/remove-all` | delete every image from this session |
