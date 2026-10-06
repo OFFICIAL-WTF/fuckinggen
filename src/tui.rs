@@ -1948,7 +1948,10 @@ mod tests {
     #[test]
     fn gallery_selection_walks_and_clamps() {
         assert_eq!(next_selection(0, None, -1), None);
-        assert_eq!(next_selection(3, None, -1), Some(2));
+        // no selection starts from the newest item, then moves and clamps
+        assert_eq!(next_selection(3, None, -1), Some(1));
+        assert_eq!(next_selection(3, None, 1), Some(2));
+        assert_eq!(next_selection(3, None, 0), Some(2));
         assert_eq!(next_selection(3, Some(2), -1), Some(1));
         assert_eq!(next_selection(3, Some(1), -1), Some(0));
         assert_eq!(next_selection(3, Some(0), -1), Some(0));
