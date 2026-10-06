@@ -3,9 +3,34 @@ use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 pub fn home_dir() -> Option<PathBuf> {
-    std::env::var_os("HOME")
-        .filter(|v| !v.is_empty())
-        .map(PathBuf::from)
+    home_from(|key| std::env::var_os(key))
+}
+
+/// `$HOME` everywhere, `%USERPROFILE%` (or `%HOMEDRIVE%%HOMEPATH%`) on Windows.
+/// Split out from [`home_dir`] so the lookup order is testable.
+fn home_from(get: impl Fn(&str) -> Option<std::ffi::OsString>) -> Option<PathBuf> {
+    for key in ["HOME", "USERPROFILE"] {
+        if let Some(value) = get(key).filter(|value| !value.is_empty()) {
+            return Some(PathBuf::from(value));
+        }
+    }
+    match (
+        get("HOMEDRIVE").filter(|value| !value.is_empty()),
+        get("HOMEPATH").filter(|value| !value.is_empty()),
+    ) {
+        (Some(drive), Some(path)) => {
+            // Plain string concatenation on purpose: `%HOMEPATH%` starts with a
+            // separator, and path joins would treat it as absolute on Unix.
+            let mut home = drive.to_string_lossy().into_owned();
+            let path = path.to_string_lossy();
+            if !path.starts_with(['\\', '/']) {
+                home.push('\\');
+            }
+            home.push_str(&path);
+            Some(PathBuf::from(home))
+        }
+        _ => None,
+    }
 }
 
 pub fn expand_tilde(input: &str) -> String {
@@ -189,6 +214,41 @@ fn civil_from_days(z: i64) -> (i64, i64, i64) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn home_dir_lookup_order_covers_windows_and_unix() {
+        use std::ffi::OsString;
+        let env = |pairs: &'static [(&'static str, &'static str)]| {
+            move |key: &str| {
+                pairs
+                    .iter()
+                    .find(|(name, _)| *name == key)
+                    .map(|(_, value)| OsString::from(*value))
+            }
+        };
+
+        // Unix and Windows both set $HOME these days; it wins.
+        assert_eq!(
+            home_from(env(&[
+                ("HOME", "/home/you"),
+                ("USERPROFILE", r"C:\Users\you")
+            ])),
+            Some(PathBuf::from("/home/you"))
+        );
+        // Windows without $HOME.
+        assert_eq!(
+            home_from(env(&[("USERPROFILE", r"C:\Users\you")])),
+            Some(PathBuf::from(r"C:\Users\you"))
+        );
+        // Older Windows: drive + path.
+        assert_eq!(
+            home_from(env(&[("HOMEDRIVE", "C:"), ("HOMEPATH", r"\Users\you")])),
+            Some(PathBuf::from(r"C:\Users\you"))
+        );
+        // Empty values are ignored, and a missing drive is not a home.
+        assert_eq!(home_from(env(&[("HOME", ""), ("HOMEPATH", r"\you")])), None);
+        assert_eq!(home_from(env(&[])), None);
+    }
 
     #[test]
     fn slug_shapes() {

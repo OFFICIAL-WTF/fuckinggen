@@ -9,7 +9,7 @@ on:
       tag:
         description: Release tag to publish
         required: true
-        default: v0.1.0
+        default: v0.1.2
 
 permissions:
   contents: write
@@ -41,6 +41,10 @@ jobs:
             target: aarch64-unknown-linux-gnu
             platform: linux-aarch64
             cross: true
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            platform: windows-x86_64
+            cross: false
     steps:
       - name: Check out repository
         uses: actions/checkout@v4
@@ -61,7 +65,8 @@ jobs:
           CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER: ${{ matrix.cross && 'aarch64-linux-gnu-gcc' || '' }}
         run: cargo build --release --locked --target ${{ matrix.target }}
 
-      - name: Package
+      - name: Package (unix)
+        if: runner.os != 'Windows'
         shell: bash
         run: |
           root="fuckinggen-${RELEASE_TAG}-${{ matrix.target }}"
@@ -71,11 +76,24 @@ jobs:
           cp README.md LICENSE "dist/$root/"
           tar -czf "dist/$root.tar.gz" -C dist "$root"
 
+      - name: Package (windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $root = "fuckinggen-$env:RELEASE_TAG-${{ matrix.target }}"
+          New-Item -ItemType Directory -Force -Path "dist/$root" | Out-Null
+          Copy-Item "target/${{ matrix.target }}/release/fgen.exe" "dist/$root/"
+          Copy-Item "target/${{ matrix.target }}/release/fuckinggen.exe" "dist/$root/"
+          Copy-Item README.md, LICENSE "dist/$root/"
+          New-Item -ItemType Directory -Force -Path "dist/$root/skills/gpt-image-gen-latest" | Out-Null
+          Copy-Item "skills/gpt-image-gen-latest/SKILL.md" "dist/$root/skills/gpt-image-gen-latest/"
+          Compress-Archive -Path "dist/$root" -DestinationPath "dist/$root.zip"
+
       - name: Upload archive
         uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.target }}
-          path: dist/*.tar.gz
+          path: dist/*
           if-no-files-found: error
 
   publish:
@@ -93,5 +111,7 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ env.RELEASE_TAG }}
-          files: dist/*.tar.gz
+          files: |
+            dist/*.tar.gz
+            dist/*.zip
           generate_release_notes: true

@@ -348,6 +348,23 @@ impl Printer {
         }
     }
 
+    /// In-place progress (`\r` + erase-line) needs a terminal that understands
+    /// ANSI. Linux and macOS consoles do; on Windows only VT-capable ones
+    /// (Windows Terminal and friends) do, so ask before emitting escapes.
+    fn animated(&self) -> bool {
+        if !self.tty {
+            return false;
+        }
+        #[cfg(windows)]
+        {
+            crossterm::ansi_support::supports_ansi()
+        }
+        #[cfg(not(windows))]
+        {
+            true
+        }
+    }
+
     fn start(&self, index: usize, total: usize, prompt: &str, target: &Path) {
         if self.json {
             self.json_line(&json!({
@@ -368,7 +385,7 @@ impl Printer {
             total,
             auth::truncate(prompt, 60)
         );
-        if self.tty {
+        if self.animated() {
             let _ = write!(std::io::stderr(), "{label} ...");
             let _ = std::io::stderr().flush();
         } else {
@@ -397,7 +414,7 @@ impl Printer {
             phase.as_str(),
             elapsed.as_secs_f64()
         );
-        if self.tty {
+        if self.animated() {
             let _ = write!(std::io::stderr(), "\r\x1b[K{line}");
             let _ = std::io::stderr().flush();
         } else {
@@ -417,7 +434,7 @@ impl Printer {
             }));
             return;
         }
-        if self.tty {
+        if self.animated() {
             let _ = write!(std::io::stderr(), "\r\x1b[K");
         }
         if !self.quiet {
@@ -445,7 +462,7 @@ impl Printer {
             }));
             return;
         }
-        if self.tty {
+        if self.animated() {
             let _ = write!(std::io::stderr(), "\r\x1b[K");
         }
         eprintln!(

@@ -1,9 +1,6 @@
-<!-- logo: drop assets/logo.png into the repo and uncomment the block below -->
-<!--
 <p align="center">
-  <img src="assets/logo.png" alt="fuckinggen logo" width="180" />
+  <img src="assets/logo.png" alt="fgen logo" width="180" />
 </p>
--->
 
 <p align="center">
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-000000?style=flat-square&logo=rust&logoColor=white" alt="Built with Rust" /></a>
@@ -14,6 +11,7 @@
   <a href="https://github.com/prophesourvolodymyr/fuckinggen/blob/main/LICENSE"><img src="https://img.shields.io/github/license/prophesourvolodymyr/fuckinggen?style=flat-square" alt="WTFPL license" /></a>
   <img src="https://img.shields.io/badge/macOS-supported-000000?style=flat-square&logo=apple&logoColor=white" alt="macOS supported" />
   <img src="https://img.shields.io/badge/Linux-supported-FCC624?style=flat-square&logo=linux&logoColor=black" alt="Linux supported" />
+  <img src="https://img.shields.io/badge/Windows-supported-0078D4?style=flat-square&logo=windows&logoColor=white" alt="Windows supported" />
   <img src="https://img.shields.io/badge/ChatGPT-subscription-10A37F?style=flat-square&logo=openai&logoColor=white" alt="Runs on your ChatGPT subscription" />
 </p>
 
@@ -22,8 +20,6 @@
 <h2 align="center">Generate images. Fucking generate them.</h2>
 
 <p align="center">Images from your own ChatGPT subscription, straight from the terminal. CLI and a real TUI.</p>
-
-`fgen` makes images with the ChatGPT account already logged in on your machine. No API key, no per-image API invoice — it rides the subscription you already pay for, on the current image model (ChatGPT Images 2.5). `fuckinggen` is the same binary with the longer name.
 
 ## See it work
 
@@ -128,9 +124,19 @@ Everything on Linux:
 
 ---
 
-## Windows
+## <img src="./assets/platform-windows.svg" alt="Windows" width="18" height="18" /> Windows
 
-Not supported yet. There is no Windows build, and the open/reveal paths are macOS and Linux only.
+**Manual:** download the Windows zip (`…-x86_64-pc-windows-*.zip`) from [Releases](https://github.com/prophesourvolodymyr/fuckinggen/releases/latest), unzip it somewhere permanent, and add that folder to your `PATH`. It contains `fgen.exe`, `fuckinggen.exe` (same program), the README, the license, and the agent skill.
+
+Everything on Windows:
+
+- `/open` uses `start`, `/view` reveals the file with `explorer /select,`.
+- Windows Terminal shows the TUI in full colour; inline previews fall back to half-blocks.
+- The progress line switches to plain output on consoles without ANSI/VT support.
+- `codex login` works the same; the token lives in `%USERPROFILE%\.codex\auth.json`. `~` expands to `%USERPROFILE%` (or `%HOMEDRIVE%%HOMEPATH%`).
+- The agent skill ships as `skills\gpt-image-gen-latest` in the zip: copy it into your agent's skills folder by hand (`install.sh` is bash-only, so it is for macOS and Linux).
+
+---
 
 ### Auth (once)
 
@@ -195,7 +201,7 @@ cargo run --bin fgen -- gen "a red square on white"
 
 - The tool talks to the same ChatGPT/Codex backend channel the Codex CLI uses, with your existing subscription login. Unofficial, not affiliated with OpenAI — use it within OpenAI's terms.
 - No API key ever touches this tool.
-- macOS and Linux are the supported platforms today.
+- macOS, Linux, and Windows are the supported platforms today.
 
 ## License
 

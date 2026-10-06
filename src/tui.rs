@@ -1051,7 +1051,21 @@ impl App {
         } else {
             Command::new("open").arg(&path).spawn()
         };
-        #[cfg(not(target_os = "macos"))]
+        // Windows has no "reveal" verb, but explorer's /select, does the same
+        // job; `start` (with the empty window-title argument) opens the file
+        // with whatever is registered for the extension.
+        #[cfg(target_os = "windows")]
+        let outcome = if in_finder {
+            Command::new("explorer")
+                .arg(format!("/select,{}", path.display()))
+                .spawn()
+        } else {
+            Command::new("cmd")
+                .args(["/C", "start", ""])
+                .arg(&path)
+                .spawn()
+        };
+        #[cfg(not(any(target_os = "macos", target_os = "windows")))]
         let outcome = {
             let target = if in_finder {
                 path.parent().unwrap_or(&path).to_path_buf()
@@ -2047,9 +2061,9 @@ fn hit_test_static(button: Rect, quality: Rect, input: Rect, column: u16, row: u
 }
 
 /// `dbus-send` arguments for `org.freedesktop.FileManager1.ShowItems`, the
-/// Linux implementation of "reveal in the file manager". It is compiled only
-/// on Linux-like targets, where this command is used.
-#[cfg(not(target_os = "macos"))]
+/// Linux implementation of "reveal in the file manager". macOS and Windows
+/// have their own reveal commands instead.
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
 fn file_manager_args(uri: &str) -> Vec<String> {
     vec![
         "--session".to_string(),
@@ -2431,7 +2445,7 @@ mod tests {
         assert_eq!(game.body[0], SnakePoint { x: 4, y: 1 });
     }
 
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
     #[test]
     fn file_manager_args_reveal_the_file() {
         let args = file_manager_args("file:///tmp/out/img.png");
