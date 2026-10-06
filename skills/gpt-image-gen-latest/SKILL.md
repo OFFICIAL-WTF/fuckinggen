@@ -71,7 +71,7 @@ Interactive terminal UI. Blue accent by default; theme lives in `~/.config/fucki
 
 - Type a prompt, `enter` generates; `shift`+`enter` adds a line and the prompt box grows to fit.
 - Drag & drop or paste image paths to attach references — any number of files at once (quoted, backslash-escaped, or `file://` paths all work). Attached refs appear as previews in the `refs` strip above the prompt bar (click one to remove it). A path typed or dropped into the prompt attaches instead of generating, so a drop can never fire a stray prompt.
-- While generating, a small snake board sits below the progress bar. Click it to focus, use arrow keys to steer, and rely on edge wraparound; `Esc` pauses the game without cancelling generation.
+- While generating, a big square snake board fills the middle of the output panel and is already listening: arrow keys steer it immediately (no click needed), the body tapers from head to tail, and crossing an edge wraps around. `Esc` pauses the game (press it again to cancel the generation instead).
 - Type `/` to open the command palette above the prompt bar; `↑`/`↓` pick, `tab` completes, `enter` runs.
 
 Slash commands:

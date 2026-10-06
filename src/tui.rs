@@ -220,6 +220,36 @@ impl SnakeDirection {
 }
 
 const SNAKE_STEP: Duration = Duration::from_millis(180);
+/// The board is drawn as a square block in the middle of the output panel.
+const MIN_SNAKE_SIDE: u16 = 8;
+const MAX_SNAKE_SIDE: u16 = 28;
+
+/// Biggest square board (in game cells) that fits in `area`. Every game cell
+/// takes two terminal columns, so a square cell grid looks square on screen.
+/// `None` when there is no room for a game worth playing.
+fn snake_board_cells(area: Rect) -> Option<u16> {
+    let columns = area.width.saturating_sub(2) / 2;
+    let rows = area.height.saturating_sub(2);
+    let side = columns.min(rows).min(MAX_SNAKE_SIDE);
+    (side >= MIN_SNAKE_SIDE).then_some(side)
+}
+
+/// Circles shrink towards the tail: big circle, bullet, bullet operator, middle
+/// dot, period — six grades (two circles) so the transition reads smooth rather
+/// than stepped.
+const SNAKE_TAPER: [&str; 6] = ["●", "●", "•", "∙", "·", "."];
+
+/// Circle size by distance from the head, interpolated across the whole body.
+fn segment_glyph(index: usize, len: usize) -> &'static str {
+    if index == 0 || len <= 3 {
+        return SNAKE_TAPER[0];
+    }
+    let grades = SNAKE_TAPER.len() - 1;
+    let span = len - 1;
+    // Rounded division: 0 at the head, `grades` at the tail.
+    let grade = (index * grades + span / 2) / span;
+    SNAKE_TAPER[grade.min(grades)]
+}
 
 struct SnakeGame {
     width: u16,
@@ -267,7 +297,9 @@ impl SnakeGame {
             x: self.width / 2,
             y: self.height / 2,
         };
-        let length = 4.min(usize::from(self.width));
+        // Longer snake on a bigger board, so a big square does not start with a
+        // stubby worm and the tail taper has room to show.
+        let length = (usize::from(self.width) / 4).clamp(4, 10);
         self.body = (0..length)
             .map(|offset| SnakePoint {
                 x: (i32::from(center.x) - offset as i32).rem_euclid(i32::from(self.width)) as u16,
@@ -1196,6 +1228,9 @@ impl App {
             started: Instant::now(),
             phase: Phase::Queued,
         };
+        // The board shows up with the generation; nobody should have to click
+        // anything before the arrow keys steer it.
+        self.snake.activate();
         self.input.clear();
         self.cursor = 0;
         self.refresh_palette();
@@ -1501,17 +1536,19 @@ fn draw_running_stage(
     phase: &Phase,
     elapsed: Duration,
 ) {
-    let game_height = 8.min(area.height.saturating_sub(5));
-    if game_height < 5 {
+    // Progress on top, then the biggest square board that fits, centered in
+    // whatever is left.
+    let progress_height = 5.min(area.height / 2);
+    let chunks =
+        Layout::vertical([Constraint::Length(progress_height), Constraint::Min(0)]).split(area);
+    if snake_board_cells(chunks[1]).is_none() {
+        // Too small for a board: just show the progress, centered.
         app.snake_area = Rect::default();
         app.snake.deactivate();
-        let lines = marquee_lines(area.width, app.tick, phase, elapsed, app.accent());
+        let lines = marquee_lines(chunks[0].width, app.tick, phase, elapsed, app.accent());
         frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), area);
         return;
     }
-
-    let chunks =
-        Layout::vertical([Constraint::Min(5), Constraint::Length(game_height)]).split(area);
     let lines = marquee_lines(chunks[0].width, app.tick, phase, elapsed, app.accent());
     frame.render_widget(
         Paragraph::new(lines).alignment(Alignment::Center),
@@ -1521,27 +1558,29 @@ fn draw_running_stage(
 }
 
 fn draw_snake(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    let panel_width = area.width.min(52);
-    let panel_height = area.height.min(9);
-    if panel_width < 12 || panel_height < 5 {
+    let Some(side) = snake_board_cells(area) else {
         app.snake_area = Rect::default();
         app.snake.deactivate();
         return;
-    }
+    };
 
+    // Two columns per game cell, so the block is square and sits in the middle.
     let panel = Rect {
-        x: area.x + area.width.saturating_sub(panel_width) / 2,
-        y: area.y + area.height.saturating_sub(panel_height),
-        width: panel_width,
-        height: panel_height,
+        x: area.x + area.width.saturating_sub(side * 2 + 2) / 2,
+        y: area.y + area.height.saturating_sub(side + 2) / 2,
+        width: side * 2 + 2,
+        height: side + 2,
     };
     app.snake_area = panel;
     let focused = app.snake.focused;
     let accent = app.accent();
     let title = if focused {
-        format!(" snake · {} · arrows · wrap ", app.snake.score)
+        format!(
+            " snake · {} · arrows to steer · edges wrap ",
+            app.snake.score
+        )
     } else {
-        " snake · click to play · wrap ".to_string()
+        " snake · paused · arrows or click to play ".to_string()
     };
     let border = if focused { accent } else { Color::DarkGray };
     let block = Block::default()
@@ -1554,33 +1593,33 @@ fn draw_snake(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let inner = block.inner(panel);
     frame.render_widget(block, panel);
 
-    let columns = (inner.width / 2).max(1);
-    let rows = inner.height.max(1);
-    app.snake.resize(columns, rows);
+    app.snake.resize(side, side);
     let snake = &app.snake;
-    let head = snake.body.first().copied();
-    let mut lines = Vec::with_capacity(usize::from(rows));
-    for y in 0..rows {
-        let mut spans = Vec::with_capacity(usize::from(columns));
-        for x in 0..columns {
+    let length = snake.body.len();
+    let body_style = if focused {
+        Style::default().fg(Color::White)
+    } else {
+        Style::default().fg(Color::Gray)
+    };
+    let mut lines = Vec::with_capacity(usize::from(side));
+    for y in 0..side {
+        let mut spans = Vec::with_capacity(usize::from(side));
+        for x in 0..side {
             let point = SnakePoint { x, y };
-            let (glyph, style) = if head == Some(point) {
-                (
+            let (glyph, style) = match snake.body.iter().position(|segment| *segment == point) {
+                Some(0) => (
                     "● ",
                     Style::default().fg(accent).add_modifier(Modifier::BOLD),
-                )
-            } else if snake.body.contains(&point) {
-                ("● ", Style::default().fg(Color::White))
-            } else if snake.food == point {
-                ("◆ ", Style::default().fg(Color::Yellow))
-            } else {
-                ("· ", Style::default().fg(Color::DarkGray))
+                ),
+                Some(index) => (segment_glyph(index, length), body_style),
+                None if snake.food == point => ("◆ ", Style::default().fg(Color::Yellow)),
+                None => ("· ", Style::default().fg(Color::DarkGray)),
             };
             spans.push(Span::styled(glyph, style));
         }
         lines.push(Line::from(spans));
     }
-    frame.render_widget(Paragraph::new(lines).alignment(Alignment::Center), inner);
+    frame.render_widget(Paragraph::new(lines), inner);
 }
 
 fn marquee_lines<'a>(
@@ -1837,7 +1876,11 @@ fn draw_controls(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         " ⏎ GENERATE "
     };
     let hint_text = if running {
-        "esc cancel · ctrl-c quit "
+        if app.snake.focused {
+            "esc pauses the game · ctrl-c quit "
+        } else {
+            "esc cancels · ctrl-c quit "
+        }
     } else {
         "↑↓ gallery · shift+enter newline · esc cancel · ctrl-c quit "
     };
@@ -2029,6 +2072,7 @@ fn draw_help(frame: &mut Frame<'_>, app: &App, area: Rect) {
         ("enter", "generate · run a /command"),
         ("shift+enter", "new line, the prompt box grows with it"),
         ("↑ ↓", "walk the generated images"),
+        ("arrows", "steer the snake while it generates"),
         ("tab", "focus the generate button"),
         ("esc", "cancel a running generation, clear the prompt"),
         ("ctrl-t", "cycle quality · ctrl-c quit"),
@@ -2412,6 +2456,44 @@ mod tests {
     fn focus_toggles() {
         assert_eq!(Focus::Input.toggled(), Focus::Button);
         assert_eq!(Focus::Button.toggled(), Focus::Input);
+    }
+
+    #[test]
+    fn snake_board_is_square_and_fits() {
+        // 80x30 panel: rows are the limit (30 - 2 borders), and the board is square.
+        assert_eq!(snake_board_cells(Rect::new(0, 0, 80, 30)), Some(28));
+        // Narrow panel: columns become the limit ((40 - 2) / 2 = 19).
+        assert_eq!(snake_board_cells(Rect::new(0, 0, 40, 30)), Some(19));
+        // The board never exceeds the cap, even in a huge terminal.
+        assert_eq!(snake_board_cells(Rect::new(0, 0, 400, 200)), Some(28));
+        // Too small to play: no board at all.
+        assert_eq!(snake_board_cells(Rect::new(0, 0, 20, 8)), None);
+    }
+
+    #[test]
+    fn snake_body_tapers_towards_the_tail() {
+        let length = 12;
+        let glyphs: Vec<&str> = (0..length).map(|i| segment_glyph(i, length)).collect();
+        assert_eq!(glyphs[0], "●", "head is a full circle");
+        assert_eq!(glyphs[length - 1], ".", "tail is the smallest dot");
+        // Sizes must never grow again towards the tail.
+        let rank = |g: &str| match g {
+            "●" => 4,
+            "•" => 3,
+            "∙" => 2,
+            "·" => 1,
+            _ => 0,
+        };
+        assert!(glyphs.windows(2).all(|pair| rank(pair[0]) >= rank(pair[1])));
+        // The ramp is graded, not three chunky bands.
+        let distinct: std::collections::BTreeSet<&&str> = glyphs.iter().collect();
+        assert!(
+            distinct.len() >= 4,
+            "expected a graded taper, got {distinct:?}"
+        );
+        // Short snakes stay solid.
+        assert_eq!(segment_glyph(2, 3), "●");
+        assert_eq!(segment_glyph(1, 0), "●");
     }
 
     #[test]

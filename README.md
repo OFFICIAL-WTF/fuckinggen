@@ -70,7 +70,7 @@ fgen -t
 - Prompt box. `enter` generates, `shift`+`enter` adds a line and the box grows with your text.
 - Drag & drop (or paste) image paths — one or many, quoted or escaped — and they attach as references: previews show up in the `refs` strip above the prompt bar, click one to drop it. A path never fires a generation by accident.
 - Every generation lands in a gallery: `↑`/`↓` (or `ctrl-p`/`ctrl-n`) walk through them, the title shows `index/total` and the file size.
-- While it generates, a snake board appears below the progress bar. Click it, steer with the arrows, edges wrap.
+- While it generates, a big square snake board fills the middle of the output panel and is already listening: **arrows steer it right away** (no click, no focus), the body tapers from head to tail, and the edges wrap. `esc` pauses it; click the board to pick it back up.
 - Type `/` for the command palette above the prompt bar (arrows pick, tab completes, enter runs). Saves into the folder you are `cd`-ed in — `/root` moves everything to `~/Downloads` instead.
 - Blue by default; `/settings` cycles the theme, flips quality, and logs you into Codex.
 
