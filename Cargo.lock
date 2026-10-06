@@ -701,6 +701,7 @@ dependencies = [
  "image",
  "ratatui",
  "ratatui-image",
+ "serde",
  "serde_json",
  "tempfile",
  "ureq",

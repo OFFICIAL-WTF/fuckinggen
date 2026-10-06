@@ -6,6 +6,8 @@ pub struct GenArgs {
     pub out: Option<String>,
     pub out_dir: Option<String>,
     pub images: Vec<String>,
+    /// Attach the Nth most recent generation as a reference (1 = latest).
+    pub last: Option<usize>,
     pub quality: String,
     pub size: Option<String>,
     pub model: String,
@@ -21,6 +23,7 @@ pub struct GenArgs {
 pub enum Command {
     Gen(Box<GenArgs>),
     Tui(Box<TuiArgs>),
+    Last { count: usize, json: bool },
     Auth { json: bool },
     Help,
     Version,
@@ -38,6 +41,7 @@ fuckinggen — generate images with your ChatGPT subscription
 Usage:
   fuckinggen gen [PROMPT...] [options]
   fuckinggen tui [PROMPT...] [-d DIR]    (same as: fuckinggen -t, fgen -t)
+  fuckinggen last [-n N] [--json]         recent generations, newest first
   fuckinggen auth [--json]
   fuckinggen help | --version
 
@@ -47,6 +51,7 @@ gen options:
                             trailing slash keeps the prompt-derived filename
   -d, --out-dir <dir>       save directory (default: $FUCKINGGEN_OUT_DIR or ~/Downloads)
   -i, --image <path>        reference image sent with every prompt (repeatable)
+      --last [N]            also attach the Nth most recent generation (default 1)
   -q, --quality <q>         low | medium | high | auto (default: auto)
   -s, --size <auto|WxH>     ask for a size (the backend may override it)
   -m, --model <slug>        carrier model (default: gpt-6-sol)
@@ -80,10 +85,36 @@ pub fn parse(argv: &[String]) -> Result<Command> {
             Ok(Command::Auth { json })
         }
         "tui" | "-t" | "--tui" => parse_tui(&argv[1..]),
+        "last" => parse_last(&argv[1..]),
         "-h" | "--help" | "help" => Ok(Command::Help),
         "-V" | "--version" | "version" => Ok(Command::Version),
         other => bail!("unknown command: {other}\n\n{HELP}"),
     }
+}
+
+fn parse_last(args: &[String]) -> Result<Command> {
+    let mut count = 10usize;
+    let mut json = false;
+    let mut i = 0;
+    while i < args.len() {
+        let arg = args[i].as_str();
+        match arg {
+            "-h" | "--help" => return Ok(Command::Help),
+            "-n" | "--count" => {
+                let value = take(args, &mut i, arg)?;
+                count = value
+                    .parse()
+                    .map_err(|_| anyhow!("--count must be a number (got {value})"))?;
+                if count == 0 {
+                    bail!("--count must be at least 1");
+                }
+            }
+            "--json" => json = true,
+            other => bail!("unknown last option: {other}\n\n{HELP}"),
+        }
+        i += 1;
+    }
+    Ok(Command::Last { count, json })
 }
 
 fn parse_tui(args: &[String]) -> Result<Command> {
@@ -127,6 +158,7 @@ fn parse_gen(args: &[String]) -> Result<Command> {
         out: None,
         out_dir: None,
         images: Vec::new(),
+        last: None,
         quality: "auto".to_string(),
         size: None,
         model: crate::api::DEFAULT_MODEL.to_string(),
@@ -146,6 +178,19 @@ fn parse_gen(args: &[String]) -> Result<Command> {
             "-o" | "--out" => g.out = Some(take(args, &mut i, arg)?),
             "-d" | "--out-dir" => g.out_dir = Some(take(args, &mut i, arg)?),
             "-i" | "--image" | "--images" => g.images.push(take(args, &mut i, arg)?),
+            "--last" => {
+                let mut count = 1usize;
+                if let Some(next) = args.get(i + 1)
+                    && let Ok(parsed) = next.parse::<usize>()
+                {
+                    if parsed == 0 {
+                        bail!("--last index starts at 1");
+                    }
+                    count = parsed;
+                    i += 1;
+                }
+                g.last = Some(count);
+            }
             "-q" | "--quality" => {
                 let value = take(args, &mut i, arg)?;
                 if !matches!(value.as_str(), "low" | "medium" | "high" | "auto") {
@@ -297,6 +342,30 @@ mod tests {
             panic!("expected gen")
         };
         assert_eq!(g.prompts, vec!["--not-a-flag"]);
+    }
+
+    #[test]
+    fn parses_last_flag_and_command() {
+        let cmd = parse(&args(&["gen", "x", "--last"])).unwrap();
+        let Command::Gen(g) = cmd else {
+            panic!("expected gen")
+        };
+        assert_eq!(g.last, Some(1));
+
+        let cmd = parse(&args(&["gen", "x", "--last", "3"])).unwrap();
+        let Command::Gen(g) = cmd else {
+            panic!("expected gen")
+        };
+        assert_eq!(g.last, Some(3));
+
+        let cmd = parse(&args(&["last", "-n", "5", "--json"])).unwrap();
+        let Command::Last { count, json } = cmd else {
+            panic!("expected last")
+        };
+        assert_eq!(count, 5);
+        assert!(json);
+
+        assert!(parse(&args(&["gen", "x", "--last", "0"])).is_err());
     }
 
     #[test]

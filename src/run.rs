@@ -1,4 +1,4 @@
-use anyhow::{Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde_json::json;
 use std::io::{IsTerminal, Write};
 use std::path::{Path, PathBuf};
@@ -11,6 +11,7 @@ use crate::args::{Command, GenArgs};
 use crate::auth;
 use crate::files;
 use crate::images;
+use crate::state;
 
 pub fn run(cmd: Command) -> Result<i32> {
     match cmd {
@@ -24,8 +25,21 @@ pub fn run(cmd: Command) -> Result<i32> {
         }
         Command::Auth { json } => run_auth(json),
         Command::Tui(args) => crate::tui::run_tui(*args),
+        Command::Last { count, json } => run_last(count, json),
         Command::Gen(args) => run_gen(*args),
     }
+}
+
+fn run_last(count: usize, json: bool) -> Result<i32> {
+    let records = state::recent(count);
+    if json {
+        println!("{}", serde_json::to_string(&records)?);
+    } else {
+        for record in &records {
+            println!("{}", record.path);
+        }
+    }
+    Ok(0)
 }
 
 fn run_auth(json: bool) -> Result<i32> {
@@ -108,11 +122,20 @@ fn run_gen(args: GenArgs) -> Result<i32> {
         .out_dir
         .as_deref()
         .map(|dir| PathBuf::from(files::expand_tilde(dir)));
-    let ref_paths: Vec<PathBuf> = args
+    let mut ref_paths: Vec<PathBuf> = args
         .images
         .iter()
         .map(|path| PathBuf::from(files::expand_tilde(path)))
         .collect();
+    if let Some(index) = args.last {
+        let records = state::recent(index);
+        let record = records.get(index - 1).ok_or_else(|| {
+            anyhow!(
+                "no finished generation #{index} to attach yet; generate one first or pass --images"
+            )
+        })?;
+        ref_paths.push(PathBuf::from(&record.path));
+    }
     let jobs: Vec<JobPlan> = args
         .prompts
         .iter()
@@ -207,6 +230,7 @@ fn run_gen(args: GenArgs) -> Result<i32> {
                             Ok(generated) => {
                                 match write_output(&job.target, &generated) {
                                     Ok(path) => {
+                                        let _ = state::record(&path, &job.prompt);
                                         let _ = tx.send(Msg::Saved {
                                             index,
                                             total,

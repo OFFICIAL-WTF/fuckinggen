@@ -61,11 +61,14 @@ fgen gen "hero shot" --json
 
 **TUI** — `fgen -t`
 
-- Prompt box, enter to generate.
-- Drag & drop (or paste) an image path to attach a reference.
-- Follow-up prompts edit the last image; the terminal renders the result inline.
-- Saves into whatever folder you are `cd`-ed into.
-- `tab` cycles quality · `esc` cancels/clears · `ctrl-c` quits.
+- Prompt box, enter to generate; `shift`+`enter` adds a line and the box grows with your text.
+- Drag & drop (or paste) an image path and it attaches as a reference — previews show up in a `refs` strip right above the prompt bar, click one to drop it.
+- Every generation lands in a gallery: `↑`/`↓` (or `ctrl-p`/`ctrl-n`) walk through them, the panel title shows `index/total` and the file size.
+- Type `/` for the command palette above the prompt bar (arrows pick, tab completes, enter runs).
+- Saves into whatever folder you are `cd`-ed into — `/root` moves everything to `~/Downloads` instead.
+- Blue by default; `/settings` cycles the theme, flips quality, and logs you into Codex.
+
+Slash commands: `/open` (Preview) · `/view` (Finder) · `/root` · `/remove` · `/remove-all` · `/quality` · `/dir` · `/settings` · `/help` · `/clear` · `/quit`
 
 ## Install
 
@@ -107,11 +110,15 @@ fgen gen "prompt"                      # one image into ~/Downloads
 fgen gen "prompt" --out ./thing.png    # exact path
 fgen gen "a" "b" --out-dir ./assets    # batch, parallel with -c
 fgen gen "edit this" -i ref.png        # reference image / edit
+fgen gen "make it blue" --last         # follow-up edit of the newest generation
+fgen last -n 5                         # list recent generations
 fgen gen "prompt" --quality high       # low | medium | high | auto
 fgen tui                               # interactive TUI (fgen -t)
 fgen auth                              # token status
 fgen --help                            # everything else
 ```
+
+Every finished image is remembered (newest first, last 50) in `~/.local/state/fuckinggen/state.json` — that is what `--last` and `fgen last` read, and it is how follow-up edits of "the thing you just made" work without hunting for paths.
 
 Existing files are never overwritten: `thing.png` becomes `thing-v2.png`, then `thing-v3.png`, and so on.
 

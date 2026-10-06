@@ -7,10 +7,12 @@
 pub mod api;
 pub mod args;
 pub mod auth;
+pub mod config;
 pub mod files;
 pub mod http;
 pub mod images;
 pub mod run;
+pub mod state;
 pub mod tui;
 
 use std::process::ExitCode;
