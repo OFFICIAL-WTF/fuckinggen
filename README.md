@@ -72,7 +72,11 @@ fgen -t
 - Every generation lands in a gallery: `↑`/`↓` (or `ctrl-p`/`ctrl-n`) walk through them, the title shows `index/total`, the file size, and whether it is `saved` or `unsaved`.
 - **Follow-ups keep the picture.** The next prompt carries the image you are looking at back to the model, so "change the cup to a cucumber" edits it instead of generating a lonely cucumber. `/ctx` turns that off for a fresh start; with the CLI it is `--last`.
 - While it generates, a compact square snake board sits in the middle of the output panel (solid dots, head in the accent colour) and is already listening: **arrows steer it right away** (no click, no focus), and the edges wrap. `esc` pauses it; click the board to pick it back up.
+- **Browse and act.** `↑`/`↓` walk the gallery and put that image's prompt back in the prompt bar — edit it and press `enter` to make the next version from it. While you are browsing, single keys act on the picture you are looking at:
+  `enter` keep · `del` remove · `r` another take (the model is told the last one did not land) · `b` cut the background out (transparent PNG) · `y` copy the prompt to the clipboard · `+` start a fresh prompt.
+- `[+]` in the control bar does the same as `+`: an empty prompt, the default state after a render.
 - The **terminal tab names the work**: your prompt, `⠋ your prompt` while it renders, and `keep N image(s)?` while the checklist is up. The title you had before is restored on exit.
+- First run shows a four-page tour (arrow keys page through, `esc` skips); `/guide` brings it back. After enough generations a one-time coffee popup flashes for three seconds — `enter` opens it, `esc` skips, and `/settings` can turn it off.
 - Type `/` for the command palette above the prompt bar (arrows pick, tab completes, enter runs).
 
 **Nothing lands in your folders until you say so.** A session generates into a scratch cache, and the way out is a checklist:
@@ -87,7 +91,7 @@ Ticked images move into the save directory — the folder you are `cd`-ed in, or
 
 - Blue by default; `/settings` cycles the theme, flips quality, and logs you into Codex.
 
-Slash commands: `/open` (system image viewer) · `/view` (reveal in the file manager) · `/save` · `/save-all` · `/ctx` · `/root` · `/remove` · `/remove-all` · `/quality` · `/dir` · `/settings` · `/help` · `/clear` · `/quit`
+Slash commands: `/open` (system image viewer) · `/view` (reveal in the file manager) · `/save` · `/save-all` · `/new` · `/regen` · `/bg` · `/copy` · `/ctx` · `/guide` · `/root` · `/remove` · `/remove-all` · `/quality` · `/dir` · `/settings` · `/help` · `/clear` · `/quit`
 
 Transparent renders stay transparent in Kitty and iTerm2 terminals (they carry an alpha channel); everywhere else the picture is composited onto your terminal background instead of turning into a black box.
 

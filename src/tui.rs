@@ -67,6 +67,31 @@ const COMMANDS: &[CommandSpec] = &[
         description: "move session images to ~/Downloads and save there",
     },
     CommandSpec {
+        name: "/guide",
+        args: "",
+        description: "show the tour again",
+    },
+    CommandSpec {
+        name: "/new",
+        args: "",
+        description: "empty the prompt for a fresh idea",
+    },
+    CommandSpec {
+        name: "/regen",
+        args: "",
+        description: "another take on the selected image's prompt",
+    },
+    CommandSpec {
+        name: "/bg",
+        args: "",
+        description: "same picture, background removed (transparent)",
+    },
+    CommandSpec {
+        name: "/copy",
+        args: "",
+        description: "copy the selected image's prompt",
+    },
+    CommandSpec {
         name: "/save",
         args: "",
         description: "keep the selected image (moves it out of the session cache)",
@@ -144,6 +169,7 @@ enum Hit {
     Button,
     Quality,
     Finish,
+    NewPrompt,
     Palette(usize),
     Reference(usize),
     Snake,
@@ -233,7 +259,7 @@ struct Settings {
     selection: usize,
 }
 
-const SETTINGS_ROWS: usize = 6;
+const SETTINGS_ROWS: usize = 7;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct SnakePoint {
@@ -448,6 +474,7 @@ struct App {
     hit_button: Rect,
     hit_quality: Rect,
     hit_finish_button: Rect,
+    hit_new_button: Rect,
     hit_palette: Vec<(Rect, usize)>,
     hit_refs: Vec<(Rect, usize)>,
     hit_settings: Vec<(Rect, usize)>,
@@ -467,6 +494,19 @@ struct App {
     /// Follow-up generations hand the selected image back to the model, since
     /// the backend request is stateless. `/ctx` turns it off.
     carry_context: bool,
+    /// True while the user is walking the gallery with the arrow keys: single
+    /// letters then act as shortcuts instead of typing.
+    browse_mode: bool,
+    /// Set as soon as the user edits the prompt, so browsing never eats a draft.
+    prompt_dirty: bool,
+    /// First-run tour page, or `None` when it is not on screen.
+    intro: Option<usize>,
+    /// Coffee popup auto-close deadline, while it is on screen.
+    coffee_until: Option<Instant>,
+    /// Generations produced by this install (persisted in the config).
+    runs: u32,
+    hit_intro: Rect,
+    hit_coffee: Rect,
     hit_finish_rows: Vec<(Rect, usize)>,
     hit_finish_buttons: Vec<(Rect, FinishButton)>,
     help_open: bool,
@@ -481,6 +521,13 @@ impl App {
         let picker = terminal_picker();
         let config = config::load();
         let accent = accent_from_config(config.accent.as_deref());
+        // Read these before `config` moves into the app.
+        let intro_page = if config.intro_seen.unwrap_or(false) {
+            None
+        } else {
+            Some(0)
+        };
+        let runs = config.runs.unwrap_or(0);
         let quality = config
             .quality
             .clone()
@@ -530,6 +577,7 @@ impl App {
             hit_button: Rect::default(),
             hit_quality: Rect::default(),
             hit_finish_button: Rect::default(),
+            hit_new_button: Rect::default(),
             hit_palette: Vec::new(),
             hit_refs: Vec::new(),
             hit_settings: Vec::new(),
@@ -543,6 +591,13 @@ impl App {
             finish: None,
             forced_quit: false,
             carry_context: true,
+            browse_mode: false,
+            prompt_dirty: false,
+            intro: intro_page,
+            coffee_until: None,
+            runs,
+            hit_intro: Rect::default(),
+            hit_coffee: Rect::default(),
             hit_finish_rows: Vec::new(),
             hit_finish_buttons: Vec::new(),
             help_open: false,
@@ -634,6 +689,7 @@ impl App {
             } else {
                 self.snake.deactivate();
             }
+            self.coffee_tick();
             self.sync_terminal_title();
             terminal.draw(|frame| draw(frame, self))?;
             if event::poll(TICK)? {
@@ -726,6 +782,9 @@ impl App {
         if self.hit_finish_button.contains(position) {
             return Some(Hit::Finish);
         }
+        if self.hit_new_button.contains(position) {
+            return Some(Hit::NewPrompt);
+        }
         if self.hit_input.contains(position) {
             return Some(Hit::Input);
         }
@@ -739,6 +798,24 @@ impl App {
     }
 
     fn on_mouse(&mut self, mouse: MouseEvent) {
+        if self.coffee_until.is_some() {
+            if matches!(mouse.kind, MouseEventKind::Down(_)) {
+                self.dismiss_coffee(true);
+            }
+            return;
+        }
+        if self.intro.is_some() {
+            if matches!(mouse.kind, MouseEventKind::Down(_))
+                && let Some(page) = self.intro
+            {
+                if page + 1 >= INTRO_PAGES.len() {
+                    self.finish_intro();
+                } else {
+                    self.intro = Some(page + 1);
+                }
+            }
+            return;
+        }
         if self.finish.is_some() {
             self.on_finish_mouse(mouse);
             return;
@@ -758,6 +835,7 @@ impl App {
                         self.cycle_quality();
                     }
                     Some(Hit::Finish) => self.request_quit(),
+                    Some(Hit::NewPrompt) => self.new_prompt(),
                     Some(Hit::Input) => self.focus = Focus::Input,
                     Some(Hit::Palette(index)) => {
                         self.focus = Focus::Input;
@@ -919,6 +997,24 @@ impl App {
             self.on_settings_key(key);
             return;
         }
+        if self.coffee_until.is_some() {
+            match key.code {
+                KeyCode::Enter => self.dismiss_coffee(true),
+                _ => self.dismiss_coffee(false),
+            }
+            return;
+        }
+        if self.intro.is_some() {
+            if matches!(
+                (key.code, key.modifiers),
+                (KeyCode::Char('c'), KeyModifiers::CONTROL)
+            ) {
+                self.finish_intro();
+                return;
+            }
+            self.on_intro_key(key);
+            return;
+        }
         if self.finish.is_some() {
             // Inside the checklist, a second ctrl-c means "just get out".
             if matches!(
@@ -986,6 +1082,7 @@ impl App {
                     self.focus = Focus::Input;
                     self.input.clear();
                     self.cursor = 0;
+                    self.prompt_dirty = false;
                     self.refresh_palette();
                 }
             }
@@ -996,8 +1093,8 @@ impl App {
             (KeyCode::Down, _) if palette_open => {
                 self.palette_selection = (self.palette_selection + 1) % self.palette.len();
             }
-            (KeyCode::Up, _) => self.select_gallery(-1),
-            (KeyCode::Down, _) => self.select_gallery(1),
+            (KeyCode::Up, _) => self.browse(-1),
+            (KeyCode::Down, _) => self.browse(1),
             (KeyCode::Tab, _) if palette_open => self.complete_palette(),
             (KeyCode::Tab, _) => {
                 self.focus = self.focus.toggled();
@@ -1043,8 +1140,36 @@ impl App {
             {
                 self.submit()
             }
+            // While walking the gallery, single keys act on the picture you are
+            // looking at instead of typing into the box.
+            (code, KeyModifiers::NONE)
+                if browse_shortcut(
+                    code,
+                    self.browse_mode,
+                    self.prompt_dirty,
+                    self.selected.is_some(),
+                    self.input.is_empty(),
+                )
+                .is_some() =>
+            {
+                match browse_shortcut(
+                    code,
+                    self.browse_mode,
+                    self.prompt_dirty,
+                    self.selected.is_some(),
+                    self.input.is_empty(),
+                ) {
+                    Some(BrowseAction::Remove) => self.remove_selected(),
+                    Some(BrowseAction::Regenerate) => self.regenerate_selected(),
+                    Some(BrowseAction::Cutout) => self.remove_background(),
+                    Some(BrowseAction::CopyPrompt) => self.copy_selected_prompt(),
+                    Some(BrowseAction::NewPrompt) => self.new_prompt(),
+                    None => {}
+                }
+            }
             (KeyCode::Backspace, _) => {
                 self.focus = Focus::Input;
+                self.prompt_dirty = true;
                 backspace(&mut self.input, &mut self.cursor);
                 self.refresh_palette();
             }
@@ -1063,6 +1188,8 @@ impl App {
                 ) =>
             {
                 self.focus = Focus::Input;
+                self.browse_mode = false;
+                self.prompt_dirty = true;
                 insert_text(&mut self.input, &mut self.cursor, &c.to_string());
                 self.refresh_palette();
             }
@@ -1119,10 +1246,17 @@ impl App {
                 }
             }
             3 => {
+                let enabled = !self.config.coffee_enabled.unwrap_or(true);
+                self.config.coffee_enabled = Some(enabled);
+                self.save_config();
+                let state = if enabled { "on" } else { "off" };
+                self.set_status(Level::Info, format!("coffee popup {state}"));
+            }
+            4 => {
                 self.settings.open = false;
                 self.pending_login = true;
             }
-            4 => {
+            5 => {
                 self.refresh_auth();
                 let note = self.auth_note.clone();
                 if self.auth_ok {
@@ -1159,6 +1293,11 @@ impl App {
             "/open" => self.reveal(false),
             "/view" => self.reveal(true),
             "/root" => self.move_to_downloads(),
+            "/guide" => self.intro = Some(0),
+            "/new" => self.new_prompt(),
+            "/regen" => self.regenerate_selected(),
+            "/bg" => self.remove_background(),
+            "/copy" => self.copy_selected_prompt(),
             "/save" => self.save_selected(),
             "/save-all" => self.save_all_staged(),
             "/ctx" => {
@@ -1416,6 +1555,70 @@ impl App {
         self.quit = true;
     }
 
+    /// The first-run tour: pages of plain talk about what this thing does.
+    fn on_intro_key(&mut self, key: KeyEvent) {
+        let Some(page) = self.intro else {
+            return;
+        };
+        let last = INTRO_PAGES.len() - 1;
+        match (key.code, key.modifiers) {
+            (KeyCode::Right, _) | (KeyCode::Enter, _) | (KeyCode::Char(' '), _) => {
+                if page >= last {
+                    self.finish_intro();
+                } else {
+                    self.intro = Some(page + 1);
+                }
+            }
+            (KeyCode::Left, _) => self.intro = Some(page.saturating_sub(1)),
+            (KeyCode::Esc, _) => self.finish_intro(),
+            _ => {}
+        }
+    }
+
+    fn finish_intro(&mut self) {
+        self.intro = None;
+        self.config.intro_seen = Some(true);
+        self.save_config();
+        self.set_status(Level::Info, "have fun — /guide brings the tour back");
+    }
+
+    /// WTFIS-style coffee nudge: full screen, three seconds, Enter opens it.
+    fn start_coffee(&mut self) {
+        self.coffee_until = Some(Instant::now() + Duration::from_secs(COFFEE_SECONDS));
+        self.config.coffee_shown = Some(true);
+        self.save_config();
+    }
+
+    fn dismiss_coffee(&mut self, open_link: bool) {
+        self.coffee_until = None;
+        if open_link {
+            open_url(COFFEE_URL);
+            self.set_status(Level::Ok, "thanks — opening buymeacoffee.com");
+        }
+    }
+
+    fn coffee_tick(&mut self) {
+        if let Some(deadline) = self.coffee_until
+            && Instant::now() >= deadline
+        {
+            self.coffee_until = None;
+        }
+    }
+
+    /// Called when a render lands: counts it and decides about the coffee.
+    fn note_generation(&mut self) {
+        self.runs = self.runs.saturating_add(1);
+        self.config.runs = Some(self.runs);
+        let due = self.config.coffee_enabled.unwrap_or(true)
+            && self.runs >= COFFEE_AFTER_RUNS
+            && !self.config.coffee_shown.unwrap_or(false);
+        if due {
+            self.start_coffee();
+        } else {
+            self.save_config();
+        }
+    }
+
     fn on_finish_mouse(&mut self, mouse: MouseEvent) {
         if !matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
             return;
@@ -1469,6 +1672,97 @@ impl App {
             }
             _ => {}
         }
+    }
+
+    /// Walk the gallery: the arrow keys both select and put that image's prompt
+    /// back in the prompt bar, so it can be re-read, copied or edited.
+    fn browse(&mut self, delta: i32) {
+        self.select_gallery(delta);
+        self.browse_mode = true;
+        self.load_selected_prompt();
+    }
+
+    fn load_selected_prompt(&mut self) {
+        if self.prompt_dirty {
+            self.set_status(
+                Level::Info,
+                "draft kept — esc clears it, then arrows load prompts again",
+            );
+            return;
+        }
+        let Some(prompt) = self
+            .selected
+            .and_then(|index| self.gallery.get(index))
+            .map(|item| item.prompt.clone())
+        else {
+            return;
+        };
+        self.input = prompt;
+        self.cursor = self.input.chars().count();
+        self.refresh_palette();
+    }
+
+    /// The default after a render: an empty prompt, with the picture still
+    /// selected so the next prompt edits it.
+    fn new_prompt(&mut self) {
+        self.input.clear();
+        self.cursor = 0;
+        self.browse_mode = false;
+        self.prompt_dirty = false;
+        self.refresh_palette();
+        self.set_status(Level::Info, "fresh prompt — type, or / for commands");
+    }
+
+    /// Re-run the selected picture's prompt, telling the model the last attempt
+    /// did not land, so it comes back with a visibly different take.
+    fn regenerate_selected(&mut self) {
+        let Some(item) = self.selected.and_then(|index| self.gallery.get(index)) else {
+            self.set_status(Level::Err, "nothing generated yet");
+            return;
+        };
+        let prompt = nudge_prompt(&item.prompt);
+        self.input = prompt;
+        self.cursor = self.input.chars().count();
+        self.browse_mode = false;
+        self.prompt_dirty = true;
+        self.submit();
+    }
+
+    /// Ask for the same picture with the background gone, so it comes back as a
+    /// transparent cut-out.
+    fn remove_background(&mut self) {
+        let Some(item) = self.selected.and_then(|index| self.gallery.get(index)) else {
+            self.set_status(Level::Err, "nothing generated yet");
+            return;
+        };
+        let prompt = cutout_prompt(&item.prompt);
+        self.input = prompt;
+        self.cursor = self.input.chars().count();
+        self.browse_mode = false;
+        self.prompt_dirty = true;
+        self.submit();
+    }
+
+    /// Put the selected picture's prompt on the system clipboard (OSC 52), so it
+    /// can be pasted anywhere — terminals that do not support it simply ignore
+    /// the sequence.
+    fn copy_selected_prompt(&mut self) {
+        let Some(prompt) = self
+            .selected
+            .and_then(|index| self.gallery.get(index))
+            .map(|item| item.prompt.clone())
+        else {
+            self.set_status(Level::Err, "nothing generated yet");
+            return;
+        };
+        if prompt.trim().is_empty() {
+            self.set_status(Level::Info, "that image has no prompt recorded");
+            return;
+        }
+        let mut stdout = std::io::stdout();
+        let _ = write!(stdout, "{}", clipboard_escape(&prompt));
+        let _ = stdout.flush();
+        self.set_status(Level::Ok, "prompt copied to the clipboard");
     }
 
     fn remove_selected(&mut self) {
@@ -1587,6 +1881,8 @@ impl App {
         self.snake.activate();
         self.input.clear();
         self.cursor = 0;
+        self.prompt_dirty = false;
+        self.browse_mode = false;
         self.refresh_palette();
         self.set_status(Level::Info, "generating…");
     }
@@ -1633,6 +1929,7 @@ impl App {
                             human_bytes(done.bytes)
                         ),
                     );
+                    self.note_generation();
                     self.job = Job::Idle;
                     return;
                 }
@@ -1652,20 +1949,10 @@ impl App {
         let _ = elapsed;
     }
 
-    fn display_input(&self) -> String {
-        let chars: Vec<char> = self.input.chars().collect();
-        let cursor = self.cursor.min(chars.len());
-        let mut out = String::new();
-        for (index, ch) in chars.iter().enumerate() {
-            if index == cursor {
-                out.push('▏');
-            }
-            out.push(*ch);
-        }
-        if cursor == chars.len() {
-            out.push('▏');
-        }
-        out
+    /// The prompt as styled spans: the character under the cursor (or a space at
+    /// the end) is drawn in reverse video so the caret is unmistakable.
+    fn input_spans(&self) -> Vec<Span<'static>> {
+        input_spans_for(&self.input, self.cursor, self.accent)
     }
 }
 
@@ -1758,11 +2045,91 @@ fn terminal_picker() -> Picker {
     picker
 }
 
+/// What a plain letter means while the user is walking the gallery. Split out
+/// from the key handler so the rules are testable: shortcuts only fire in
+/// browse mode, only before the draft is edited, and never with no selection.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum BrowseAction {
+    Remove,
+    Regenerate,
+    Cutout,
+    CopyPrompt,
+    NewPrompt,
+}
+
+fn browse_shortcut(
+    key: KeyCode,
+    browse_mode: bool,
+    prompt_dirty: bool,
+    has_selection: bool,
+    input_empty: bool,
+) -> Option<BrowseAction> {
+    if !browse_mode || !has_selection {
+        return None;
+    }
+    match key {
+        // Deleting a file is not an edit, so it waits for an empty prompt; the
+        // others are "act on this picture" verbs and only need an untouched one.
+        KeyCode::Backspace | KeyCode::Delete if input_empty => Some(BrowseAction::Remove),
+        KeyCode::Char('r') if !prompt_dirty => Some(BrowseAction::Regenerate),
+        KeyCode::Char('b') if !prompt_dirty => Some(BrowseAction::Cutout),
+        KeyCode::Char('y') if !prompt_dirty => Some(BrowseAction::CopyPrompt),
+        KeyCode::Char('+') if input_empty || !prompt_dirty => Some(BrowseAction::NewPrompt),
+        _ => None,
+    }
+}
+
+/// OSC 52: put text on the system clipboard. Terminals that do not implement it
+/// ignore the sequence; nothing is lost either way.
+fn clipboard_escape(text: &str) -> String {
+    use base64::Engine as _;
+    format!(
+        "\x1b]52;c;{}\x07",
+        base64::engine::general_purpose::STANDARD.encode(text.as_bytes())
+    )
+}
+
+/// Split the prompt into `before`, the cursor cell (reverse video), and `after`.
+fn input_spans_for(input: &str, cursor: usize, accent: Color) -> Vec<Span<'static>> {
+    let chars: Vec<char> = input.chars().collect();
+    let cursor = cursor.min(chars.len());
+    let cursor_style = Style::default()
+        .fg(Color::Black)
+        .bg(accent)
+        .add_modifier(Modifier::BOLD);
+    let mut spans: Vec<Span<'static>> = Vec::with_capacity(3);
+    if cursor > 0 {
+        spans.push(Span::raw(chars[..cursor].iter().collect::<String>()));
+    }
+    match chars.get(cursor) {
+        Some(ch) => spans.push(Span::styled(ch.to_string(), cursor_style)),
+        None => spans.push(Span::styled(" ", cursor_style)),
+    }
+    let after_start = cursor.saturating_add(1).min(chars.len());
+    if after_start < chars.len() {
+        spans.push(Span::raw(chars[after_start..].iter().collect::<String>()));
+    }
+    spans
+}
+
+/// Hand a URL to whatever the desktop uses for links.
+fn open_url(url: &str) {
+    #[cfg(target_os = "macos")]
+    let outcome = Command::new("open").arg(url).spawn();
+    #[cfg(target_os = "windows")]
+    let outcome = Command::new("cmd")
+        .args(["/C", "start", ""])
+        .arg(url)
+        .spawn();
+    #[cfg(not(any(target_os = "macos", target_os = "windows")))]
+    let outcome = Command::new("xdg-open").arg(url).spawn();
+    let _ = outcome;
+}
+
 fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let area = frame.area();
     let inner_width = area.width.saturating_sub(4).max(8);
-    let wanted =
-        wrapped_lines(&app.display_input(), inner_width).clamp(1, MAX_INPUT_ROWS as usize) as u16;
+    let wanted = wrapped_lines(&app.input, inner_width).clamp(1, MAX_INPUT_ROWS as usize) as u16;
     let refs_height = if app.refs.is_empty() { 0 } else { 5 };
     let palette_height = if app.palette.is_empty() {
         0
@@ -1805,6 +2172,12 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     }
     if app.finish.is_some() {
         draw_finish(frame, app, area);
+    }
+    if app.intro.is_some() {
+        draw_intro(frame, app, area);
+    }
+    if app.coffee_until.is_some() {
+        draw_coffee(frame, app, area);
     }
 }
 
@@ -2237,7 +2610,11 @@ fn draw_input(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     } else {
         Color::DarkGray
     };
-    let mut title = String::from(" prompt ");
+    let mut title = if app.browse_mode {
+        String::from(" prompt · browsing ")
+    } else {
+        String::from(" prompt ")
+    };
     if !app.refs.is_empty() {
         title.push_str(&format!("· ▣ {} ", app.refs.len()));
     }
@@ -2256,14 +2633,17 @@ fn draw_input(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         ))
         .padding(Padding::horizontal(1));
 
-    let body = if app.input.is_empty() {
-        Line::from(Span::styled(
-            "Fucking type something…  (/ for commands)",
-            Style::default().fg(Color::DarkGray),
-        ))
-    } else {
-        Line::from(app.display_input()).style(Style::default().add_modifier(Modifier::BOLD))
-    };
+    let mut spans = app.input_spans();
+    if app.input.is_empty() {
+        spans = vec![
+            Span::styled(" ", Style::default().bg(app.accent)),
+            Span::styled(
+                "  Fucking type something…  (/ for commands)",
+                Style::default().fg(Color::DarkGray),
+            ),
+        ];
+    }
+    let body = Line::from(spans).style(Style::default().add_modifier(Modifier::BOLD));
     frame.render_widget(
         Paragraph::new(body)
             .block(block)
@@ -2274,28 +2654,26 @@ fn draw_input(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 }
 
 fn draw_controls(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
-    app.hit_button = Rect {
-        x: area.x,
+    // Lay the row out left to right so nothing can overlap the next control.
+    let mut x = area.x;
+    let take = |x: u16, width: u16| Rect {
+        x,
         y: area.y,
-        width: 14.min(area.width),
+        width: width.min(area.width.saturating_sub(x.saturating_sub(area.x))),
         height: 1,
     };
-    app.hit_quality = Rect {
-        x: area.x + 15,
-        y: area.y,
-        width: 18.min(area.width.saturating_sub(15)),
-        height: 1,
-    };
-    app.hit_finish_button = Rect {
-        x: app.hit_quality.x + app.hit_quality.width + 1,
-        y: area.y,
-        width: 13.min(
-            area.width
-                .saturating_sub(app.hit_quality.x + app.hit_quality.width + 1),
-        ),
-        height: 1,
-    };
-    let status_x = app.hit_finish_button.x + app.hit_finish_button.width + 1;
+    app.hit_button = take(x, 14);
+    x = x.saturating_add(app.hit_button.width).saturating_add(1);
+    app.hit_new_button = take(x, 5);
+    x = x.saturating_add(app.hit_new_button.width).saturating_add(1);
+    app.hit_quality = take(x, 18);
+    x = x.saturating_add(app.hit_quality.width).saturating_add(1);
+    app.hit_finish_button = take(x, 13);
+    let status_x = app
+        .hit_finish_button
+        .x
+        .saturating_add(app.hit_finish_button.width)
+        .saturating_add(1);
 
     let running = matches!(app.job, Job::Running { .. });
     let label = if running {
@@ -2311,6 +2689,8 @@ fn draw_controls(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         } else {
             "esc cancels · ctrl-c finish "
         }
+    } else if app.browse_mode {
+        "enter re-run · r again · b cut-out · y copy prompt · esc then del removes "
     } else if app.selected.is_some() {
         "↑↓ · enter keep · ctrl-c finish "
     } else {
@@ -2344,6 +2724,16 @@ fn draw_controls(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             quality_style,
         ))),
         app.hit_quality,
+    );
+
+    let new_style = if app.hover == Some(Hit::NewPrompt) {
+        Style::default().fg(Color::Black).bg(app.accent())
+    } else {
+        Style::default().fg(Color::DarkGray)
+    };
+    frame.render_widget(
+        Paragraph::new(Line::from(Span::styled(" [+] ", new_style))),
+        app.hit_new_button,
     );
 
     let finish_style = if app.hover == Some(Hit::Finish) {
@@ -2441,6 +2831,14 @@ fn draw_settings(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         format!("theme        {}", theme_name(app.accent)),
         format!("quality      {}", app.quality),
         format!("save dir     {}", truncate_chars(&out_dir, 34)),
+        format!(
+            "coffee popup {}",
+            if app.config.coffee_enabled.unwrap_or(true) {
+                "on"
+            } else {
+                "off"
+            }
+        ),
         "login with codex".to_string(),
         "refresh auth status".to_string(),
         "close".to_string(),
@@ -2528,6 +2926,24 @@ fn protocol_keeps_alpha(protocol: ratatui_image::picker::ProtocolType) -> bool {
     matches!(
         protocol,
         ratatui_image::picker::ProtocolType::Kitty | ratatui_image::picker::ProtocolType::Iterm2
+    )
+}
+
+/// "Another take" prompt: same subject, visibly different treatment.
+fn nudge_prompt(prompt: &str) -> String {
+    format!(
+        "{prompt}
+
+The previous attempt at this did not land. Keep the same subject and intent, but take a clearly different approach — different style, lighting and composition — so this is a genuinely new option rather than a variation."
+    )
+}
+
+/// "Cut it out" prompt: same subject, transparent background.
+fn cutout_prompt(prompt: &str) -> String {
+    format!(
+        "{prompt}
+
+Keep the subject exactly as it is and remove the background completely: a clean cut-out on a fully transparent background (transparent PNG, no backdrop, no shadow on a surface)."
     )
 }
 
@@ -2697,6 +3113,122 @@ fn draw_finish(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 }
 
+/// The first-run tour, in the spirit of WTFIS's intro panel.
+fn draw_intro(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let Some(page) = app.intro else {
+        return;
+    };
+    let (title, body) = &INTRO_PAGES[page.min(INTRO_PAGES.len() - 1)];
+    let width = 74.min(area.width);
+    let height = (body.len() as u16 + 7).min(area.height);
+    let panel = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    app.hit_intro = panel;
+    frame.render_widget(Clear, panel);
+    let accent = app.accent();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(accent))
+        .title(Span::styled(
+            format!(" fgen · {title} "),
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Span::styled(
+            format!(
+                " {}/{} · ← → pages · enter next · esc skip ",
+                page + 1,
+                INTRO_PAGES.len()
+            ),
+            Style::default().fg(Color::DarkGray),
+        ));
+    let inner = block.inner(panel);
+    frame.render_widget(block, panel);
+    let mut lines: Vec<Line> = vec![Line::from("")];
+    for line in body {
+        lines.push(Line::from(Span::styled(
+            line.to_string(),
+            Style::default().fg(Color::White),
+        )));
+    }
+    frame.render_widget(
+        Paragraph::new(lines)
+            .alignment(Alignment::Center)
+            .wrap(Wrap { trim: true }),
+        inner,
+    );
+}
+
+/// What the coffee popup says, WTFIS-style: loud, short, three seconds.
+fn coffee_lines(remaining: Duration) -> Vec<Line<'static>> {
+    vec![
+        Line::from(Span::styled(
+            "Fgen keeping you fed?☕️",
+            Style::default()
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(""),
+        Line::from(Span::styled(
+            "[ OKAY ]",
+            Style::default()
+                .fg(Color::Yellow)
+                .bg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        )),
+        Line::from(Span::styled(
+            "Enter to open  •  Esc to skip",
+            Style::default().fg(Color::Black),
+        )),
+        Line::from(Span::styled(
+            format!("auto-closing in {}s", remaining.as_secs().saturating_add(1)),
+            Style::default().fg(Color::Black),
+        )),
+    ]
+}
+
+/// The WTFIS coffee popup: loud, brief, and only ever once.
+fn draw_coffee(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    let Some(deadline) = app.coffee_until else {
+        return;
+    };
+    app.hit_coffee = area;
+    let remaining = deadline.saturating_duration_since(Instant::now());
+    frame.render_widget(
+        Block::default().style(Style::default().bg(Color::Yellow).fg(Color::Black)),
+        area,
+    );
+    let width = area.width.saturating_sub(4).min(64);
+    let height = area.height.saturating_sub(4).min(9);
+    let popup = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(Color::Black))
+        .style(Style::default().bg(Color::Yellow).fg(Color::Black))
+        .title(Span::styled(
+            COFFEE_TITLE,
+            Style::default()
+                .fg(Color::Black)
+                .add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(popup);
+    frame.render_widget(block, popup);
+    frame.render_widget(
+        Paragraph::new(coffee_lines(remaining))
+            .alignment(Alignment::Center)
+            .style(Style::default().bg(Color::Yellow).fg(Color::Black)),
+        inner,
+    );
+}
+
 fn draw_help(frame: &mut Frame<'_>, app: &App, area: Rect) {
     let width = 74.min(area.width);
     let height = 22.min(area.height);
@@ -2778,6 +3310,57 @@ fn hit_test_static(button: Rect, quality: Rect, input: Rect, column: u16, row: u
     }
     None
 }
+
+/// Where the coffee nudge points, exactly like the WTFIS one.
+const COFFEE_URL: &str = "https://buymeacoffee.com/professorvolodymyr";
+/// Generations before the one-time coffee popup appears.
+const COFFEE_AFTER_RUNS: u32 = 10;
+const COFFEE_SECONDS: u64 = 3;
+const COFFEE_TITLE: &str = " BUY ME A COFFEE ";
+
+/// The first-run tour. Four short pages, because fgen does more than it looks.
+const INTRO_PAGES: [(&str, [&str; 5]); 4] = [
+    (
+        "fgen",
+        [
+            "Images from your own ChatGPT subscription.",
+            "No API key, no per-image invoice.",
+            "",
+            "Type a prompt, press enter, and the picture lands in the gallery.",
+            "Nothing is written to your folders until you say so.",
+        ],
+    ),
+    (
+        "the gallery",
+        [
+            "Up and down walk the images you made this session.",
+            "The prompt bar shows that image's prompt again — edit it and press",
+            "enter to make a new version of it, or use the shortcuts:",
+            "",
+            "enter keep · del remove · r another take · b cut the background · y copy the prompt",
+        ],
+    ),
+    (
+        "keeping pictures",
+        [
+            "Renders are staged in a session cache, not in your folders.",
+            "enter keeps the one you are looking at; ctrl-c (or [finish]) asks",
+            "about the rest: space ticks, enter keeps the ticked ones, n keeps",
+            "nothing. A killed window keeps its staged renders for next time.",
+            "",
+        ],
+    ),
+    (
+        "while it renders",
+        [
+            "A small snake board shows up in the middle — arrows steer it",
+            "immediately, edges wrap, esc pauses.",
+            "",
+            "The terminal tab follows along: prompt, spinner while rendering,",
+            "and the checklist question on the way out. /guide shows this again.",
+        ],
+    ),
+];
 
 /// `dbus-send` arguments for `org.freedesktop.FileManager1.ShowItems`, the
 /// Linux implementation of "reveal in the file manager". macOS and Windows
@@ -3211,6 +3794,149 @@ mod tests {
         assert!(long.chars().count() <= 49, "{long}");
         // The escape that actually reaches the terminal is OSC 0 + BEL.
         assert_eq!(title_escape("fgen"), "\u{1b}]0;fgen\u{7}");
+    }
+
+    #[test]
+    fn browse_shortcuts_only_fire_on_an_untouched_selection() {
+        use BrowseAction::*;
+        // Walking the gallery with a loaded, untouched prompt: the verbs work.
+        assert_eq!(
+            browse_shortcut(KeyCode::Char('r'), true, false, true, false),
+            Some(Regenerate)
+        );
+        assert_eq!(
+            browse_shortcut(KeyCode::Char('b'), true, false, true, false),
+            Some(Cutout)
+        );
+        assert_eq!(
+            browse_shortcut(KeyCode::Char('y'), true, false, true, false),
+            Some(CopyPrompt)
+        );
+        // Editing the draft ends the shortcuts so letters type again.
+        assert_eq!(
+            browse_shortcut(KeyCode::Char('r'), true, true, true, false),
+            None
+        );
+        assert_eq!(
+            browse_shortcut(KeyCode::Char('b'), true, true, true, false),
+            None
+        );
+        // Not browsing (or nothing selected): plain typing.
+        assert_eq!(
+            browse_shortcut(KeyCode::Char('r'), false, false, true, true),
+            None
+        );
+        assert_eq!(
+            browse_shortcut(KeyCode::Char('r'), true, false, false, true),
+            None
+        );
+        // Deleting waits for an empty prompt, so it never eats an edit.
+        assert_eq!(
+            browse_shortcut(KeyCode::Backspace, true, false, true, true),
+            Some(Remove)
+        );
+        assert_eq!(
+            browse_shortcut(KeyCode::Backspace, true, false, true, false),
+            None
+        );
+        assert_eq!(
+            browse_shortcut(KeyCode::Delete, true, false, true, true),
+            Some(Remove)
+        );
+        // Plain letters and unrelated keys stay typing.
+        assert_eq!(
+            browse_shortcut(KeyCode::Char('q'), true, false, true, true),
+            None
+        );
+        assert_eq!(
+            browse_shortcut(KeyCode::Enter, true, false, true, true),
+            None
+        );
+    }
+
+    #[test]
+    fn clipboard_escape_is_osc52() {
+        let escape = clipboard_escape("a girl holding a cup");
+        assert!(escape.starts_with("\u{1b}]52;c;"), "{escape}");
+        assert!(escape.ends_with('\u{7}'));
+        let payload = escape
+            .trim_start_matches("\u{1b}]52;c;")
+            .trim_end_matches('\u{7}');
+        use base64::Engine as _;
+        let decoded = base64::engine::general_purpose::STANDARD
+            .decode(payload)
+            .unwrap();
+        assert_eq!(String::from_utf8(decoded).unwrap(), "a girl holding a cup");
+    }
+
+    #[test]
+    fn coffee_popup_says_what_it_does() {
+        let lines = coffee_lines(Duration::from_secs(2));
+        let text: String = lines
+            .iter()
+            .map(|line| {
+                line.spans
+                    .iter()
+                    .map(|span| span.content.as_ref())
+                    .collect::<String>()
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        assert!(COFFEE_TITLE.to_lowercase().contains("coffee"));
+        assert!(text.contains("keeping you fed"), "{text}");
+        assert!(text.contains("[ OKAY ]"));
+        assert!(text.contains("Enter to open"));
+        assert!(text.contains("Esc to skip"));
+        // Countdown is rounded up so it never reads "0s" while still visible.
+        assert!(text.contains("auto-closing in 3s"), "{text}");
+    }
+
+    #[test]
+    fn cursor_spans_cover_every_position() {
+        let accent = Color::Blue;
+        // Empty prompt: just the reverse-video block (this used to panic).
+        let spans = input_spans_for("", 0, accent);
+        assert_eq!(spans.len(), 1);
+        assert_eq!(spans[0].content, " ");
+
+        let spans = input_spans_for("hi", 0, accent);
+        assert_eq!(spans.len(), 2, "block + remainder");
+        assert_eq!(spans[0].content, "h");
+        assert_eq!(spans[1].content, "i");
+
+        let spans = input_spans_for("hii", 1, accent);
+        assert_eq!(spans.len(), 3, "before + block + after");
+        assert_eq!(spans[0].content, "h");
+        assert_eq!(spans[1].content, "i");
+        assert_eq!(spans[2].content, "i");
+
+        // Cursor on the last character: nothing follows the block.
+        let spans = input_spans_for("hi", 1, accent);
+        assert_eq!(spans.len(), 2);
+        assert_eq!(spans[1].content, "i");
+
+        // Cursor past the end is clamped, never sliced out of range.
+        let spans = input_spans_for("hi", 99, accent);
+        assert_eq!(spans.len(), 2, "before + trailing block");
+        assert_eq!(spans[1].content, " ");
+    }
+
+    #[test]
+    fn gallery_nudges_keep_the_original_prompt() {
+        let asked = "a girl holding a cup";
+        let again = nudge_prompt(asked);
+        assert!(again.starts_with(asked), "the user's words come first");
+        assert!(again.contains("did not land"));
+        assert!(again.contains("different approach"));
+
+        let cut = cutout_prompt(asked);
+        assert!(cut.starts_with(asked));
+        assert!(cut.contains("transparent background"));
+        assert!(cut.contains("cut-out"));
+
+        // Nothing in the injections replaces the prompt the user wrote.
+        assert_eq!(again.lines().next(), Some(asked));
+        assert_eq!(cut.lines().next(), Some(asked));
     }
 
     #[test]

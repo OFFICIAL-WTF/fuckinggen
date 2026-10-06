@@ -12,6 +12,14 @@ pub struct Config {
     pub quality: Option<String>,
     /// Default save directory.
     pub out_dir: Option<String>,
+    /// Generations this install has produced, used to time the coffee nudge.
+    pub runs: Option<u32>,
+    /// The first-run tour has been seen (or skipped).
+    pub intro_seen: Option<bool>,
+    /// Whether the coffee popup is allowed to appear at all.
+    pub coffee_enabled: Option<bool>,
+    /// Whether it already appeared, so it only ever shows once.
+    pub coffee_shown: Option<bool>,
 }
 
 pub fn config_dir() -> PathBuf {
@@ -65,12 +73,20 @@ mod tests {
             accent: Some("blue".into()),
             quality: Some("high".into()),
             out_dir: Some("/tmp/out".into()),
+            runs: Some(9),
+            intro_seen: Some(true),
+            coffee_enabled: Some(false),
+            coffee_shown: Some(true),
         };
         save_to(&path, &config).unwrap();
         let loaded = load_from(&path);
         assert_eq!(loaded.accent.as_deref(), Some("blue"));
         assert_eq!(loaded.quality.as_deref(), Some("high"));
         assert_eq!(loaded.out_dir.as_deref(), Some("/tmp/out"));
+        assert_eq!(loaded.runs, Some(9));
+        assert_eq!(loaded.intro_seen, Some(true));
+        assert_eq!(loaded.coffee_enabled, Some(false));
+        assert_eq!(loaded.coffee_shown, Some(true));
     }
 
     #[test]
