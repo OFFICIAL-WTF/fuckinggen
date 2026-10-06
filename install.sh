@@ -20,9 +20,9 @@ SKILL_ROOTS=(
 )
 for skill_root in "${SKILL_ROOTS[@]}"; do
   [ -d "$skill_root" ] || continue
-  rm -rf "$skill_root/fuckinggen"
-  cp -R "$REPO/skills/fuckinggen" "$skill_root/fuckinggen"
-  echo "    -> $skill_root/fuckinggen/SKILL.md"
+  rm -rf "$skill_root/gpt-image-gen-latest"
+  cp -R "$REPO/skills/gpt-image-gen-latest" "$skill_root/gpt-image-gen-latest"
+  echo "    -> $skill_root/gpt-image-gen-latest/SKILL.md"
 done
 
 echo "==> done. try: fgen -t"

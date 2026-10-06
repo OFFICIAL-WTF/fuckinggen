@@ -1,9 +1,9 @@
 ---
-name: fuckinggen
+name: gpt-image-gen-latest
 description: Generate or edit images with the user's ChatGPT subscription from the terminal via the fgen/fuckinggen CLI (Codex backend) - text-to-image, reference-image edits, batch jobs, live progress, and an interactive TUI. Use for any request to create or modify raster images (illustrations, photos, posters, mockups, product shots, assets).
 ---
 
-# fuckinggen
+# GPT Image Gen (fuckinggen CLI)
 
 Terminal image generation on the user's **own ChatGPT subscription** — no API key, no per-image API billing. It calls the same ChatGPT/Codex backend channel the Codex CLI uses, with the login already on this machine. Today's model is **ChatGPT Images 2.5**.
 
