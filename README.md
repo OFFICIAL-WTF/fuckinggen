@@ -71,7 +71,8 @@ fgen -t
 - Drag & drop (or paste) image paths — one or many, quoted or escaped — and they attach as references: previews show up in the `refs` strip above the prompt bar, click one to drop it. A path never fires a generation by accident.
 - Every generation lands in a gallery: `↑`/`↓` (or `ctrl-p`/`ctrl-n`) walk through them, the title shows `index/total`, the file size, and whether it is `saved` or `unsaved`.
 - **Follow-ups keep the picture.** The next prompt carries the image you are looking at back to the model, so "change the cup to a cucumber" edits it instead of generating a lonely cucumber. `/ctx` turns that off for a fresh start; with the CLI it is `--last`.
-- While it generates, a big square snake board fills the middle of the output panel and is already listening: **arrows steer it right away** (no click, no focus), the body tapers from head to tail, and the edges wrap. `esc` pauses it; click the board to pick it back up.
+- While it generates, a compact square snake board sits in the middle of the output panel (solid dots, head in the accent colour) and is already listening: **arrows steer it right away** (no click, no focus), and the edges wrap. `esc` pauses it; click the board to pick it back up.
+- The **terminal tab names the work**: your prompt, `⠋ your prompt` while it renders, and `keep N image(s)?` while the checklist is up. The title you had before is restored on exit.
 - Type `/` for the command palette above the prompt bar (arrows pick, tab completes, enter runs).
 
 **Nothing lands in your folders until you say so.** A session generates into a scratch cache, and the way out is a checklist:

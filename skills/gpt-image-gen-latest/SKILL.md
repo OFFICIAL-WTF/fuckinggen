@@ -76,7 +76,8 @@ Interactive terminal UI. Blue accent by default; theme lives in `~/.config/fucki
 - `enter` with an empty prompt = keep the image you are looking at (moves it to the save directory and records it for `--last`). `/save` and `/save-all` do the same for one/all.
 - GALLERY: `↑`/`↓` walk the session images; the title shows `index/total`, size, and `saved`/`unsaved`.
 - Quitting asks what to keep: `ctrl-c` (or the `[finish]` button) opens a checklist where `space` ticks, `enter` keeps the ticked ones, `n` keeps nothing, and `esc` returns to the work. A second `ctrl-c` while the checklist is open force-quits and leaves the staged files in the cache, printing the path.
-- While generating, a big square snake board fills the middle of the output panel and is already listening: arrow keys steer it immediately (no click needed), the body tapers from head to tail, and crossing an edge wraps around. `Esc` pauses the game.
+- While generating, a compact square snake board sits in the middle of the output panel (solid dots, head in the accent colour) and is already listening: arrow keys steer it immediately (no click needed) and crossing an edge wraps around. `Esc` pauses the game.
+- The terminal tab shows what the window is doing: the prompt you typed, `⠋ prompt` while it renders, `keep N image(s)?` while the checkpoint is open.
 - Type `/` to open the command palette above the prompt bar; `↑`/`↓` pick, `tab` completes, `enter` runs.
 
 Slash commands:

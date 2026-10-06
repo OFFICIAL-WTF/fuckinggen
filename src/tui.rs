@@ -259,9 +259,10 @@ impl SnakeDirection {
 }
 
 const SNAKE_STEP: Duration = Duration::from_millis(130);
-/// The board is drawn as a square block in the middle of the output panel.
-const MIN_SNAKE_SIDE: u16 = 8;
-const MAX_SNAKE_SIDE: u16 = 28;
+/// The board is a square block in the middle of the output panel, kept compact
+/// so it reads as a diversion rather than a takeover.
+const MIN_SNAKE_SIDE: u16 = 6;
+const MAX_SNAKE_SIDE: u16 = 14;
 
 /// Biggest square board (in game cells) that fits in `area`. Every game cell
 /// takes two terminal columns, so a square cell grid looks square on screen.
@@ -271,23 +272,6 @@ fn snake_board_cells(area: Rect) -> Option<u16> {
     let rows = area.height.saturating_sub(2);
     let side = columns.min(rows).min(MAX_SNAKE_SIDE);
     (side >= MIN_SNAKE_SIDE).then_some(side)
-}
-
-/// Circles shrink towards the tail: big circle, bullet, bullet operator, middle
-/// dot, period — six grades (two circles) so the transition reads smooth rather
-/// than stepped.
-const SNAKE_TAPER: [&str; 6] = ["●", "●", "•", "∙", "·", "."];
-
-/// Circle size by distance from the head, interpolated across the whole body.
-fn segment_glyph(index: usize, len: usize) -> &'static str {
-    if index == 0 || len <= 3 {
-        return SNAKE_TAPER[0];
-    }
-    let grades = SNAKE_TAPER.len() - 1;
-    let span = len - 1;
-    // Rounded division: 0 at the head, `grades` at the tail.
-    let grade = (index * grades + span / 2) / span;
-    SNAKE_TAPER[grade.min(grades)]
 }
 
 struct SnakeGame {
@@ -469,6 +453,11 @@ struct App {
     palette: Vec<usize>,
     palette_selection: usize,
     settings: Settings,
+    /// The prompt of the newest generation, shown in the terminal title when
+    /// the prompt box is empty.
+    last_prompt: String,
+    /// Last title we pushed to the terminal, so we only rewrite on change.
+    title_cache: String,
     /// Scratch directory for generations the user has not decided about yet.
     session_dir: PathBuf,
     finish: Option<Finish>,
@@ -543,6 +532,8 @@ impl App {
             palette: Vec::new(),
             palette_selection: 0,
             settings: Settings::default(),
+            last_prompt: String::new(),
+            title_cache: String::new(),
             session_dir: session_dir.clone(),
             finish: None,
             forced_quit: false,
@@ -616,6 +607,7 @@ impl App {
             } else {
                 self.snake.deactivate();
             }
+            self.sync_terminal_title();
             terminal.draw(|frame| draw(frame, self))?;
             if event::poll(TICK)? {
                 match event::read()? {
@@ -638,6 +630,33 @@ impl App {
     fn set_status(&mut self, level: Level, text: impl Into<String>) {
         self.level = level;
         self.status = text.into();
+    }
+
+    /// The terminal tab says what this window is doing: the prompt you typed,
+    /// the prompt being rendered (with the spinner), or the checklist question.
+    fn sync_terminal_title(&mut self) {
+        let running = matches!(self.job, Job::Running { .. });
+        let spinner = SPINNER[(self.tick as usize / 2) % SPINNER.len()];
+        let prompt = self
+            .selected
+            .and_then(|index| self.gallery.get(index))
+            .map(|item| item.prompt.as_str())
+            .filter(|prompt| !prompt.trim().is_empty())
+            .unwrap_or(self.last_prompt.as_str());
+        let title = window_title(
+            spinner,
+            running,
+            prompt,
+            &self.input,
+            self.finish.as_ref().map(|finish| finish.rows.len()),
+        );
+        if title == self.title_cache {
+            return;
+        }
+        self.title_cache = title.clone();
+        let mut stdout = std::io::stdout();
+        let _ = write!(stdout, "{}", title_escape(&title));
+        let _ = stdout.flush();
     }
 
     fn refresh_palette(&mut self) {
@@ -1518,6 +1537,8 @@ impl App {
         }
         let (tx, rx) = mpsc::channel();
         let cancel = Arc::new(AtomicBool::new(false));
+        // Remember it for the terminal title before the worker owns it.
+        self.last_prompt = prompt.clone();
         // Generations are staged in the session cache; the user decides on the
         // way out (or with /save) what actually lands in `out_dir`.
         spawn_worker(
@@ -1944,12 +1965,9 @@ fn draw_snake(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let focused = app.snake.focused;
     let accent = app.accent();
     let title = if focused {
-        format!(
-            " snake · {} · arrows to steer · edges wrap ",
-            app.snake.score
-        )
+        format!(" snake · {} · arrows · wrap ", app.snake.score)
     } else {
-        " snake · paused · arrows or click to play ".to_string()
+        " snake · paused ".to_string()
     };
     let border = if focused { accent } else { Color::DarkGray };
     let block = Block::default()
@@ -1964,7 +1982,6 @@ fn draw_snake(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     app.snake.resize(side, side);
     let snake = &app.snake;
-    let length = snake.body.len();
     let body_style = if focused {
         Style::default().fg(Color::White)
     } else {
@@ -1980,7 +1997,7 @@ fn draw_snake(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                     "● ",
                     Style::default().fg(accent).add_modifier(Modifier::BOLD),
                 ),
-                Some(index) => (segment_glyph(index, length), body_style),
+                Some(_) => ("● ", body_style),
                 None if snake.food == point => ("◆ ", Style::default().fg(Color::Yellow)),
                 None => ("· ", Style::default().fg(Color::DarkGray)),
             };
@@ -2420,6 +2437,38 @@ fn draw_settings(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 }
 
+/// OSC 0: set the icon name and window/tab title. Terminals that do not know
+/// it ignore the sequence, and the title stack push/pop around it restores the
+/// shell's own title on the way out.
+fn title_escape(title: &str) -> String {
+    format!("\x1b]0;{title}\x07")
+}
+
+/// What the terminal tab shows. Kept separate so the rules are testable:
+/// the checklist question wins, then the spinner + the prompt being rendered,
+/// then whatever is typed, then the newest generation, then the tool name.
+fn window_title(
+    spinner: &str,
+    running: bool,
+    rendered_prompt: &str,
+    draft: &str,
+    finish_rows: Option<usize>,
+) -> String {
+    let raw = if let Some(rows) = finish_rows {
+        format!("keep {rows} image(s)?")
+    } else if running {
+        format!("{spinner} {rendered_prompt}")
+    } else if !draft.trim().is_empty() {
+        draft.trim().to_string()
+    } else if !rendered_prompt.trim().is_empty() {
+        rendered_prompt.trim().to_string()
+    } else {
+        "fgen".to_string()
+    };
+    let one_line = raw.split_whitespace().collect::<Vec<_>>().join(" ");
+    truncate_chars(&one_line, 48)
+}
+
 /// Button row of the finish screen. The second button is honest about what it
 /// does: with images already saved this session it drops the rest; with nothing
 /// saved yet it throws the lot away.
@@ -2779,6 +2828,10 @@ pub fn run_tui(args: TuiArgs) -> Result<i32> {
     let mut app = App::new(args)?;
     let mut terminal = ratatui::init();
     let _ = execute!(std::io::stdout(), EnableBracketedPaste);
+    // Push the terminal title so we can put the user's own back on the way out
+    // (xterm title stack; terminals without it just ignore both sequences).
+    let _ = std::io::stdout().write_all(b"\x1b[22;2t");
+    let _ = std::io::stdout().flush();
     // Click-only mouse tracking (X10 + SGR). Any-motion mode is deliberately
     // left off: with it enabled macOS terminals route a Finder drag to the app
     // as mouse events and the dropped file path never arrives.
@@ -2786,6 +2839,7 @@ pub fn run_tui(args: TuiArgs) -> Result<i32> {
     let _ = std::io::stdout().flush();
     let result = app.run(&mut terminal);
     let _ = std::io::stdout().write_all(b"\x1b[?1006l\x1b[?1000l");
+    let _ = std::io::stdout().write_all(b"\x1b[23;2t");
     let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     ratatui::restore();
     result?;
@@ -3093,6 +3147,38 @@ mod tests {
     }
 
     #[test]
+    fn terminal_title_follows_the_work() {
+        let spinner = "⠋";
+        // Idle with nothing to say: the tool name.
+        assert_eq!(window_title(spinner, false, "", "", None), "fgen");
+        // The newest generation names the tab.
+        assert_eq!(
+            window_title(spinner, false, "a girl holding a cup", "", None),
+            "a girl holding a cup"
+        );
+        // Typing takes over before you hit enter.
+        assert_eq!(
+            window_title(spinner, false, "a girl holding a cup", "make it blue", None),
+            "make it blue"
+        );
+        // While rendering: spinner + prompt, and newlines collapse.
+        assert_eq!(
+            window_title(spinner, true, "poster\nA   B", "", None),
+            "⠋ poster A B"
+        );
+        // The checklist question outranks everything.
+        assert_eq!(
+            window_title(spinner, true, "poster", "typing", Some(3)),
+            "keep 3 image(s)?"
+        );
+        // And it never runs away with the tab.
+        let long = window_title(spinner, false, &"x".repeat(200), "", None);
+        assert!(long.chars().count() <= 49, "{long}");
+        // The escape that actually reaches the terminal is OSC 0 + BEL.
+        assert_eq!(title_escape("fgen"), "\u{1b}]0;fgen\u{7}");
+    }
+
+    #[test]
     fn finish_buttons_name_what_they_do() {
         let fresh = finish_buttons(0);
         assert_eq!(fresh[0].0, "keep ticked");
@@ -3218,40 +3304,25 @@ mod tests {
 
     #[test]
     fn snake_board_is_square_and_fits() {
-        // 80x30 panel: rows are the limit (30 - 2 borders), and the board is square.
-        assert_eq!(snake_board_cells(Rect::new(0, 0, 80, 30)), Some(28));
-        // Narrow panel: columns become the limit ((40 - 2) / 2 = 19).
-        assert_eq!(snake_board_cells(Rect::new(0, 0, 40, 30)), Some(19));
+        // A normal panel keeps the board compact: the cap rules, not the space.
+        assert_eq!(snake_board_cells(Rect::new(0, 0, 80, 30)), Some(14));
+        // Narrow panel: columns become the limit ((16 - 2) / 2 = 7).
+        assert_eq!(snake_board_cells(Rect::new(0, 0, 16, 30)), Some(7));
         // The board never exceeds the cap, even in a huge terminal.
-        assert_eq!(snake_board_cells(Rect::new(0, 0, 400, 200)), Some(28));
-        // Too small to play: no board at all.
-        assert_eq!(snake_board_cells(Rect::new(0, 0, 20, 8)), None);
+        assert_eq!(snake_board_cells(Rect::new(0, 0, 400, 200)), Some(14));
+        // Too small to play: no board at all (columns cap out below the minimum).
+        assert_eq!(snake_board_cells(Rect::new(0, 0, 10, 30)), None);
+        // Six cells still counts as playable.
+        assert_eq!(snake_board_cells(Rect::new(0, 0, 20, 8)), Some(6));
     }
 
     #[test]
-    fn snake_body_tapers_towards_the_tail() {
-        let length = 12;
-        let glyphs: Vec<&str> = (0..length).map(|i| segment_glyph(i, length)).collect();
-        assert_eq!(glyphs[0], "●", "head is a full circle");
-        assert_eq!(glyphs[length - 1], ".", "tail is the smallest dot");
-        // Sizes must never grow again towards the tail.
-        let rank = |g: &str| match g {
-            "●" => 4,
-            "•" => 3,
-            "∙" => 2,
-            "·" => 1,
-            _ => 0,
-        };
-        assert!(glyphs.windows(2).all(|pair| rank(pair[0]) >= rank(pair[1])));
-        // The ramp is graded, not three chunky bands.
-        let distinct: std::collections::BTreeSet<&&str> = glyphs.iter().collect();
-        assert!(
-            distinct.len() >= 4,
-            "expected a graded taper, got {distinct:?}"
-        );
-        // Short snakes stay solid.
-        assert_eq!(segment_glyph(2, 3), "●");
-        assert_eq!(segment_glyph(1, 0), "●");
+    fn snake_body_is_solid_dots() {
+        // One glyph for the whole body: head in the accent colour, the rest white.
+        let mut game = SnakeGame::new();
+        game.resize(14, 14);
+        assert!(game.body.len() >= 3);
+        assert!(game.body.iter().all(|point| point.x < 14 && point.y < 14));
     }
 
     #[test]
