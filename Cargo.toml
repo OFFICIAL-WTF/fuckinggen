@@ -1,6 +1,6 @@
 [package]
 name = "fuckinggen"
-version = "0.1.8"
+version = "0.1.9"
 edition = "2024"
 description = "Generate images through your ChatGPT subscription from the terminal"
 license = "WTFPL"
@@ -30,6 +30,7 @@ ureq = { version = "2.12", features = ["json"] }
 
 [dev-dependencies]
 tempfile = "3.16"
+filetime = "0.2"
 
 [profile.release]
 strip = true

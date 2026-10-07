@@ -67,6 +67,11 @@ const COMMANDS: &[CommandSpec] = &[
         description: "move session images to ~/Downloads and save there",
     },
     CommandSpec {
+        name: "/history",
+        args: "",
+        description: "everything you kept, ready to iterate on again",
+    },
+    CommandSpec {
         name: "/guide",
         args: "",
         description: "show the tour again",
@@ -206,6 +211,19 @@ struct FinishRow {
     thumb: Option<StatefulProtocol>,
 }
 
+/// One line of the history list: a picture that was kept, somewhere on disk.
+struct HistoryRow {
+    path: PathBuf,
+    prompt: String,
+    thumb: Option<StatefulProtocol>,
+}
+
+/// Everything kept so far, so a picture from last week is one keypress away.
+struct History {
+    rows: Vec<HistoryRow>,
+    selection: usize,
+}
+
 /// The exit checklist: every unsaved generation of this session, all ticked.
 struct Finish {
     rows: Vec<FinishRow>,
@@ -292,6 +310,22 @@ impl SnakeDirection {
 const SNAKE_STEP: Duration = Duration::from_millis(130);
 /// Shown next to the best run of the session board.
 const FIRE: &str = "🔥";
+
+/// Nerd Font icons, so the controls read at a glance. A terminal without a
+/// patched font shows boxes; the words next to every icon still say it.
+const ICON_BOLT: &str = "\u{f0e7}"; // generate
+const ICON_CHECK: &str = "\u{f00c}"; // keep / finish
+const ICON_PLUS: &str = "\u{f067}"; // new prompt
+const ICON_SLIDERS: &str = "\u{f1de}"; // quality
+const ICON_HISTORY: &str = "\u{f1da}"; // history
+const ICON_TRASH: &str = "\u{f1f8}"; // remove
+const ICON_REFRESH: &str = "\u{f021}"; // another take
+const ICON_COPY: &str = "\u{f0c5}"; // copy prompt
+const ICON_CROP: &str = "\u{f125}"; // cut-out
+const ICON_IMAGE: &str = "\u{f03e}"; // gallery
+const ICON_LEFT: &str = "\u{f060}";
+const ICON_RIGHT: &str = "\u{f061}";
+const ICON_ZOOM: &str = "\u{f00e}"; // magnifier
 /// The board is a square block in the middle of the output panel, kept compact
 /// so it reads as a diversion rather than a takeover.
 const MIN_SNAKE_SIDE: u16 = 6;
@@ -525,8 +559,11 @@ struct App {
     grid_on_plus: bool,
     /// Full-screen image view: zoom factor and pan, in source pixels.
     viewer: Option<Viewer>,
+    /// Previously kept pictures, newest first, opened with /history.
+    history: Option<History>,
     /// Cell rectangles of the grid, for clicking.
     hit_grid: Vec<(Rect, usize)>,
+    hit_history: Vec<(Rect, usize)>,
     /// Columns the grid was drawn with, so row moves match what is on screen.
     grid_columns: usize,
     /// True while the user is walking the grid with the arrow keys: single
@@ -588,9 +625,9 @@ impl App {
         let input = args.initial_prompt.unwrap_or_default();
         let cursor = input.chars().count();
         let (ref_tx, ref_rx) = mpsc::channel();
-        // Pictures a previous session could not save (crash, forced quit) show
-        // up here again instead of rotting in the cache.
-        let adopted = files::adopt_stale_sessions(&session_dir);
+        // A session starts empty: leftovers from earlier sessions are scratch,
+        // and anything still unsaved after a day is deleted.
+        let pruned = files::prune_stale_sessions(&session_dir);
         let mut app = App {
             picker,
             input,
@@ -633,7 +670,9 @@ impl App {
             browse_mode: false,
             grid_on_plus: false,
             viewer: None,
+            history: None,
             hit_grid: Vec::new(),
+            hit_history: Vec::new(),
             grid_columns: 1,
             prompt_dirty: false,
             intro: intro_page,
@@ -650,26 +689,10 @@ impl App {
             quit: false,
             pending_login: false,
         };
-        for (path, prompt) in adopted {
-            let bytes = std::fs::metadata(&path)
-                .map(|meta| meta.len() as usize)
-                .unwrap_or(0);
-            app.gallery.push(GalleryItem {
-                path,
-                prompt,
-                bytes,
-                saved: false,
-                needs_load: true,
-                image: None,
-                protocol: None,
-            });
-        }
-        if let Some(last) = app.gallery.len().checked_sub(1) {
-            app.selected = Some(last);
-            let count = app.gallery.len();
+        if pruned > 0 {
             app.set_status(
                 Level::Info,
-                format!("picked up {count} image(s) from an earlier session"),
+                format!("cleaned up {pruned} unsaved image(s) older than a day"),
             );
         }
         app.snake.high_score = snake_high;
@@ -753,6 +776,112 @@ impl App {
             self.drain_ref_decodes();
         }
         Ok(())
+    }
+
+    /// Open the archive of kept pictures (state file, newest first).
+    fn open_history(&mut self) {
+        let rows: Vec<HistoryRow> = state::recent(50)
+            .into_iter()
+            .map(|record| (PathBuf::from(&record.path), record.prompt))
+            .filter(|(path, _)| path.is_file())
+            .map(|(path, prompt)| HistoryRow {
+                path,
+                prompt,
+                thumb: None,
+            })
+            .collect();
+        if rows.is_empty() {
+            self.set_status(Level::Info, "nothing kept yet — save something first");
+            return;
+        }
+        self.history = Some(History { rows, selection: 0 });
+        self.set_status(Level::Info, "history · enter loads it into the grid");
+    }
+
+    /// Pull a kept picture back into the session so it can be iterated on.
+    fn history_load(&mut self) {
+        let Some(history) = self.history.take() else {
+            return;
+        };
+        let Some(row) = history.rows.get(history.selection) else {
+            return;
+        };
+        let path = row.path.clone();
+        let prompt = row.prompt.clone();
+        if self.gallery.iter().any(|item| item.path == path) {
+            self.selected = self
+                .gallery
+                .iter()
+                .position(|item| item.path == path)
+                .or(self.selected);
+            self.grid_on_plus = false;
+            let name = display_name(&path);
+            self.set_status(Level::Info, format!("{name} is already in the grid"));
+            return;
+        }
+        let bytes = std::fs::metadata(&path)
+            .map(|meta| meta.len() as usize)
+            .unwrap_or(0);
+        self.gallery.push(GalleryItem {
+            path: path.clone(),
+            prompt,
+            bytes,
+            saved: true,
+            needs_load: true,
+            image: None,
+            protocol: None,
+        });
+        self.selected = Some(self.gallery.len() - 1);
+        self.grid_on_plus = false;
+        self.load_selected_prompt();
+        let name = display_name(&path);
+        self.set_status(
+            Level::Ok,
+            format!("{name} back in the grid — edit the prompt and press enter"),
+        );
+    }
+
+    fn on_history_key(&mut self, key: KeyEvent) {
+        let Some(history) = self.history.as_mut() else {
+            return;
+        };
+        let len = history.rows.len();
+        match key.code {
+            KeyCode::Down | KeyCode::Char('j') => {
+                history.selection = (history.selection + 1) % len;
+            }
+            KeyCode::Up | KeyCode::Char('k') => {
+                history.selection = (history.selection + len - 1) % len;
+            }
+            KeyCode::PageDown => {
+                history.selection = (history.selection + 8).min(len - 1);
+            }
+            KeyCode::PageUp => history.selection = history.selection.saturating_sub(8),
+            KeyCode::Enter => self.history_load(),
+            KeyCode::Esc | KeyCode::Char('q') => {
+                self.history = None;
+                self.set_status(Level::Info, "back to the grid");
+            }
+            _ => {}
+        }
+    }
+
+    /// Move to the next picture without leaving the full-screen view.
+    fn viewer_step_image(&mut self, delta: i32) {
+        let Some(current) = self.selected else {
+            return;
+        };
+        let next = next_selection(self.gallery.len(), Some(current), delta);
+        if next == Some(current) {
+            return;
+        }
+        self.selected = next;
+        self.grid_on_plus = false;
+        self.open_viewer();
+        if let Some(item) = next.and_then(|index| self.gallery.get(index)) {
+            let name = display_name(&item.path);
+            self.set_status(Level::Info, format!("{name} · ← → image · + zoom"));
+        }
     }
 
     fn set_status(&mut self, level: Level, text: impl Into<String>) {
@@ -1085,23 +1214,48 @@ impl App {
             }
             return;
         }
-        if let Some(viewer) = self.viewer.as_mut() {
-            match key.code {
-                KeyCode::Char('+') | KeyCode::Char('=') => {
-                    viewer.zoom = (viewer.zoom * 1.25).min(8.0);
+        if self.history.is_some() {
+            self.on_history_key(key);
+            return;
+        }
+        if self.viewer.is_some() {
+            let mut step_image = 0i32;
+            {
+                let viewer = self.viewer.as_mut().expect("checked above");
+                let zoomed = viewer.zoom > 1.0;
+                match key.code {
+                    KeyCode::Char('+') | KeyCode::Char('=') => {
+                        viewer.zoom = (viewer.zoom * 1.25).min(8.0);
+                    }
+                    KeyCode::Char('-') | KeyCode::Char('_') => {
+                        viewer.zoom = (viewer.zoom / 1.25).max(1.0);
+                    }
+                    // Zoomed in, the arrows walk around the picture. At fit size
+                    // there is nothing to pan, so left/right change pictures
+                    // instead of doing nothing at all.
+                    KeyCode::Left | KeyCode::Char('h') if zoomed => {
+                        viewer.pan_x = (viewer.pan_x - 0.08).clamp(0.0, 1.0);
+                    }
+                    KeyCode::Right | KeyCode::Char('l') if zoomed => {
+                        viewer.pan_x = (viewer.pan_x + 0.08).clamp(0.0, 1.0);
+                    }
+                    KeyCode::Up | KeyCode::Char('k') if zoomed => {
+                        viewer.pan_y = (viewer.pan_y - 0.08).clamp(0.0, 1.0);
+                    }
+                    KeyCode::Down | KeyCode::Char('j') if zoomed => {
+                        viewer.pan_y = (viewer.pan_y + 0.08).clamp(0.0, 1.0);
+                    }
+                    KeyCode::Left | KeyCode::Char('h') | KeyCode::PageUp => step_image = -1,
+                    KeyCode::Right | KeyCode::Char('l') | KeyCode::PageDown => step_image = 1,
+                    KeyCode::Char(' ') | KeyCode::Esc | KeyCode::Char('q') => {
+                        self.viewer = None;
+                        self.set_status(Level::Info, "back to the grid");
+                    }
+                    _ => {}
                 }
-                KeyCode::Char('-') | KeyCode::Char('_') => {
-                    viewer.zoom = (viewer.zoom / 1.25).max(1.0);
-                }
-                KeyCode::Left => viewer.pan_x = (viewer.pan_x - 0.08).clamp(0.0, 1.0),
-                KeyCode::Right => viewer.pan_x = (viewer.pan_x + 0.08).clamp(0.0, 1.0),
-                KeyCode::Up => viewer.pan_y = (viewer.pan_y - 0.08).clamp(0.0, 1.0),
-                KeyCode::Down => viewer.pan_y = (viewer.pan_y + 0.08).clamp(0.0, 1.0),
-                KeyCode::Char(' ') | KeyCode::Esc => {
-                    self.viewer = None;
-                    self.set_status(Level::Info, "back to the grid");
-                }
-                _ => {}
+            }
+            if step_image != 0 {
+                self.viewer_step_image(step_image);
             }
             return;
         }
@@ -1257,7 +1411,11 @@ impl App {
                     self.submit();
                 }
             }
-            (KeyCode::Char(' '), KeyModifiers::NONE) if self.browse_mode && !self.grid_on_plus => {
+            (KeyCode::Char(' '), KeyModifiers::NONE)
+                if self.input.trim().is_empty()
+                    && self.selected.is_some()
+                    && !self.grid_on_plus =>
+            {
                 self.open_viewer();
             }
             (KeyCode::Char(' '), KeyModifiers::NONE)
@@ -1285,6 +1443,8 @@ impl App {
                     self.input.is_empty(),
                 ) {
                     Some(BrowseAction::Remove) => self.remove_selected(),
+                    Some(BrowseAction::Save) => self.save_selected(),
+                    Some(BrowseAction::History) => self.open_history(),
                     Some(BrowseAction::Regenerate) => self.regenerate_selected(),
                     Some(BrowseAction::Cutout) => self.remove_background(),
                     Some(BrowseAction::CopyPrompt) => self.copy_selected_prompt(),
@@ -1418,6 +1578,7 @@ impl App {
             "/open" => self.reveal(false),
             "/view" => self.reveal(true),
             "/root" => self.move_to_downloads(),
+            "/history" => self.open_history(),
             "/guide" => self.intro = Some(0),
             "/help" => {
                 self.help_open = true;
@@ -2142,7 +2303,9 @@ impl App {
                             self.selected = Some(selected.saturating_sub(1));
                         }
                     }
+                    // The default after a render: the + square, empty prompt.
                     self.selected = Some(self.gallery.len() - 1);
+                    self.grid_on_plus = true;
                     self.set_status(
                         Level::Ok,
                         format!(
@@ -2279,6 +2442,8 @@ fn terminal_picker() -> Picker {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum BrowseAction {
     Remove,
+    Save,
+    History,
     Regenerate,
     Cutout,
     CopyPrompt,
@@ -2299,6 +2464,8 @@ fn browse_shortcut(
         // Deleting a file is not an edit, so it waits for an empty prompt; the
         // others are "act on this picture" verbs and only need an untouched one.
         KeyCode::Backspace | KeyCode::Delete if input_empty => Some(BrowseAction::Remove),
+        KeyCode::Char('s') if !prompt_dirty => Some(BrowseAction::Save),
+        KeyCode::Char('h') => Some(BrowseAction::History),
         KeyCode::Char('r') if !prompt_dirty => Some(BrowseAction::Regenerate),
         KeyCode::Char('b') if !prompt_dirty => Some(BrowseAction::Cutout),
         KeyCode::Char('y') if !prompt_dirty => Some(BrowseAction::CopyPrompt),
@@ -2398,6 +2565,9 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     }
     if app.finish.is_some() {
         draw_finish(frame, app, area);
+    }
+    if app.history.is_some() {
+        draw_history(frame, app, area);
     }
     if app.viewer.is_some() {
         draw_viewer(frame, app, area);
@@ -2623,23 +2793,168 @@ fn draw_grid(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
                 );
             }
         } else {
+            let art = plus_lines(inner.width, inner.height);
+            let style = Style::default()
+                .fg(if selected {
+                    app.accent()
+                } else {
+                    Color::DarkGray
+                })
+                .add_modifier(Modifier::BOLD);
             frame.render_widget(
-                Paragraph::new(Span::styled(
-                    "+",
-                    Style::default()
-                        .fg(if selected {
-                            app.accent()
-                        } else {
-                            Color::DarkGray
-                        })
-                        .add_modifier(Modifier::BOLD),
-                ))
+                Paragraph::new(
+                    art.into_iter()
+                        .map(|line| Line::from(Span::styled(line, style)))
+                        .collect::<Vec<_>>(),
+                )
                 .alignment(Alignment::Center),
                 inner,
             );
         }
         app.hit_grid.push((cell, index));
     }
+}
+
+/// The history panel: kept pictures with their prompts. Enter pulls one back
+/// into the grid so it can be iterated on again.
+fn draw_history(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    app.hit_history.clear();
+    if app.history.is_none() {
+        return;
+    }
+    let count = app.history.as_ref().map(|h| h.rows.len()).unwrap_or(0);
+    let selection = app.history.as_ref().map(|h| h.selection).unwrap_or(0);
+    let width = (area.width.saturating_sub(8)).min(96);
+    let row_height: u16 = 4;
+    let height = (area.height.saturating_sub(4)).min(rows_to_fit(count, row_height));
+    let panel = Rect {
+        x: area.x + area.width.saturating_sub(width) / 2,
+        y: area.y + area.height.saturating_sub(height) / 2,
+        width,
+        height,
+    };
+    frame.render_widget(Clear, panel);
+    let accent = app.accent();
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(accent))
+        .title(Span::styled(
+            format!(" {ICON_HISTORY} history · {count} kept "),
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ))
+        .title_bottom(Span::styled(
+            " ↑↓ move · enter brings it back into the grid · esc closes ",
+            Style::default().fg(Color::DarkGray),
+        ));
+    let inner = block.inner(panel);
+    frame.render_widget(block, panel);
+
+    // Decode whatever thumbnails are missing (own protocols: two render sites
+    // sharing one stateful protocol would fight over its cached size).
+    let missing: Vec<(usize, image::DynamicImage)> = app
+        .history
+        .as_ref()
+        .map(|history| {
+            history
+                .rows
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| row.thumb.is_none())
+                .filter_map(|(index, row)| {
+                    let bytes = std::fs::read(&row.path).ok()?;
+                    let image = image::load_from_memory(&bytes).ok()?;
+                    Some((index, image.thumbnail(256, 256)))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    for (index, image) in missing {
+        let protocol = app.picker.new_resize_protocol(image);
+        if let Some(history) = app.history.as_mut()
+            && let Some(row) = history.rows.get_mut(index)
+        {
+            row.thumb = Some(protocol);
+        }
+    }
+
+    let visible = usize::from(inner.height / row_height).max(1);
+    let start = if selection >= visible {
+        selection + 1 - visible
+    } else {
+        0
+    };
+    for index in start..(start + visible).min(count) {
+        let y = inner.y + ((index - start) as u16) * row_height;
+        if y + row_height > inner.y + inner.height {
+            break;
+        }
+        let row_area = Rect {
+            x: inner.x,
+            y,
+            width: inner.width,
+            height: row_height,
+        };
+        app.hit_history.push((row_area, index));
+        let selected = index == selection;
+        let Some(history) = app.history.as_mut() else {
+            return;
+        };
+        let Some(row) = history.rows.get_mut(index) else {
+            continue;
+        };
+        let thumb_area = Rect {
+            x: inner.x + 1,
+            y,
+            width: 10,
+            height: row_height,
+        };
+        match row.thumb.as_mut() {
+            Some(protocol) => frame.render_stateful_widget(
+                StatefulImage::new().resize(Resize::Fit(None)),
+                thumb_area,
+                protocol,
+            ),
+            None => frame.render_widget(
+                Paragraph::new(Span::styled(
+                    ICON_IMAGE,
+                    Style::default().fg(Color::DarkGray),
+                )),
+                thumb_area,
+            ),
+        }
+        let text_area = Rect {
+            x: thumb_area.x + thumb_area.width + 1,
+            y,
+            width: inner.width.saturating_sub(thumb_area.width + 3),
+            height: row_height,
+        };
+        let marker = if selected { "▶ " } else { "  " };
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    format!("{marker}{}", display_name(&row.path)),
+                    if selected {
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(accent)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::White)
+                    },
+                )),
+                Line::from(Span::styled(
+                    truncate_chars(&row.prompt.replace('\n', " "), text_area.width as usize),
+                    Style::default().fg(Color::DarkGray),
+                )),
+            ]),
+            text_area,
+        );
+    }
+}
+
+/// Rows needed to show `count` rows of `row_height`, plus borders.
+fn rows_to_fit(count: usize, row_height: u16) -> u16 {
+    (count as u16).saturating_mul(row_height).saturating_add(2)
 }
 
 /// Full-screen look at one image: `+`/`-` zoom, arrows pan, space or esc back.
@@ -2684,8 +2999,13 @@ fn draw_viewer(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         let viewer = app.viewer.as_ref().expect("checked above");
         (display_name(&viewer.path), viewer.zoom)
     };
+    let controls = if zoom > 1.0 {
+        "arrows pan · - zoom out"
+    } else {
+        "← → image · + zoom in"
+    };
     let title = format!(
-        " {} · {:.0}% · + / - zoom · arrows pan · space closes ",
+        " {} · {ICON_ZOOM} {:.0}% · {controls} · space closes ",
         truncate_chars(&name, 40),
         zoom * 100.0
     );
@@ -2775,6 +3095,33 @@ fn viewer_crop(
     let x = (max_x * pan_x).clamp(0.0, max_x);
     let y = (max_y * pan_y).clamp(0.0, max_y);
     image.crop_imm(x as u32, y as u32, visible as u32, visible_h as u32)
+}
+
+/// A big fat `+` drawn as text, sized to the cell so it reads as the "new one"
+/// square from across the room.
+fn plus_lines(width: u16, height: u16) -> Vec<String> {
+    let width = usize::from(width).max(3);
+    let rows = (usize::from(height).saturating_sub(1) | 1).clamp(3, 11);
+    let bar = (rows / 5).max(1); // thickness of the strokes
+    let middle = rows / 2;
+    let canvas = ((width * 3) / 5).clamp(3, width); // horizontal arm length
+    let pad_left = (canvas.saturating_sub(bar)) / 2;
+    let pad_right = canvas.saturating_sub(bar).saturating_sub(pad_left);
+    let stem = format!(
+        "{}{}{}",
+        " ".repeat(pad_left),
+        "+".repeat(bar),
+        " ".repeat(pad_right)
+    );
+    (0..rows)
+        .map(|row| {
+            if row <= middle + bar && row + bar > middle {
+                "+".repeat(canvas) // horizontal arm
+            } else {
+                stem.clone()
+            }
+        })
+        .collect()
 }
 
 /// Flat grid movement: `cells` includes the `+` cell, and moving past either end
@@ -3198,24 +3545,26 @@ fn draw_controls(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
 
     let running = matches!(app.job, Job::Running { .. });
     let label = if running {
-        " GENERATING… "
+        " GENERATING… ".to_string()
     } else if app.focus == Focus::Button || app.hover == Some(Hit::Button) {
-        "[⏎ GENERATE]"
+        format!("[{ICON_BOLT} GENERATE]")
     } else {
-        " ⏎ GENERATE "
+        format!(" {ICON_BOLT} GENERATE ")
     };
     let hint_text = if running {
         if app.snake.focused {
-            "esc pauses the game · ctrl-c quit "
+            "esc pauses the game · ctrl-c quit ".to_string()
         } else {
-            "esc cancels · ctrl-c finish "
+            "esc cancels · ctrl-c finish ".to_string()
         }
     } else if app.browse_mode {
-        "←→ cells · ↑↓ rows · space full screen · enter keep · r again · b cut-out · y copy "
+        format!(
+            "{ICON_LEFT}{ICON_RIGHT} cells · space full screen · {ICON_CHECK} enter · {ICON_REFRESH} r · {ICON_CROP} b · {ICON_COPY} y · {ICON_TRASH} del "
+        )
     } else if app.selected.is_some() {
-        "↑↓ · enter keep · ctrl-c finish "
+        format!("{ICON_IMAGE}↑↓ · {ICON_CHECK} enter keeps · ctrl-c finish ")
     } else {
-        "↑↓ · ctrl-c finish "
+        format!("{ICON_IMAGE}↑↓ grid · ctrl-c finish ")
     };
     let button_style = if running {
         Style::default().fg(Color::DarkGray)
@@ -3241,7 +3590,7 @@ fn draw_controls(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     };
     frame.render_widget(
         Paragraph::new(Line::from(Span::styled(
-            format!(" quality: {} ", app.quality),
+            format!(" {ICON_SLIDERS} {} ", app.quality),
             quality_style,
         ))),
         app.hit_quality,
@@ -3253,7 +3602,10 @@ fn draw_controls(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         Style::default().fg(Color::DarkGray)
     };
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(" [+] ", new_style))),
+        Paragraph::new(Line::from(Span::styled(
+            format!(" [{ICON_PLUS}] "),
+            new_style,
+        ))),
         app.hit_new_button,
     );
 
@@ -3267,7 +3619,10 @@ fn draw_controls(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         Style::default().fg(Color::DarkGray)
     };
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(" [✔ FINISH] ", finish_style))),
+        Paragraph::new(Line::from(Span::styled(
+            format!(" [{ICON_CHECK} FINISH] "),
+            finish_style,
+        ))),
         app.hit_finish_button,
     );
 
@@ -4168,7 +4523,7 @@ pub fn run_tui(args: TuiArgs) -> Result<i32> {
     let _ = execute!(std::io::stdout(), DisableBracketedPaste);
     ratatui::restore();
     result?;
-    report_session(&app);
+    report_session(&mut app);
     Ok(0)
 }
 
@@ -4189,7 +4544,13 @@ fn session_report(forced_quit: bool, staged: usize, session_dir: &Path) -> Optio
     None
 }
 
-fn report_session(app: &App) {
+fn report_session(app: &mut App) {
+    // Save the best run on the way out, so a high score can never be lost to a
+    // quit that happened between generations.
+    if app.snake.award() {
+        app.config.snake_high = Some(app.snake.high_score);
+        app.save_config();
+    }
     let staged = app.unsaved_count();
     if let Some(message) = session_report(app.forced_quit, staged, &app.session_dir) {
         eprintln!("{message}");
@@ -4501,6 +4862,44 @@ mod tests {
         assert!(long.chars().count() <= 49, "{long}");
         // The escape that actually reaches the terminal is OSC 0 + BEL.
         assert_eq!(title_escape("fgen"), "\u{1b}]0;fgen\u{7}");
+    }
+
+    #[test]
+    fn the_plus_cell_draws_a_big_plus() {
+        let art = plus_lines(40, 9);
+        assert!(art.len() >= 3 && art.len() % 2 == 1, "{art:?}");
+        // Every line is the same width, so it stays centred.
+        let widths: std::collections::BTreeSet<usize> =
+            art.iter().map(|line| line.chars().count()).collect();
+        assert_eq!(widths.len(), 1, "ragged lines: {art:?}");
+        // The middle is the arm, and it is wider than the stem rows.
+        let middle = art[art.len() / 2].matches('+').count();
+        assert!(middle > art[0].matches('+').count(), "{art:?}");
+        // It fits the cell it was asked for.
+        assert!(art.len() as u16 <= 9);
+        assert!(art[0].chars().count() as u16 <= 40);
+        // A cramped cell still produces something.
+        assert!(!plus_lines(3, 2).is_empty());
+    }
+
+    #[test]
+    fn history_and_save_are_reachable_from_the_grid() {
+        use BrowseAction::*;
+        assert_eq!(
+            browse_shortcut(KeyCode::Char('s'), true, false, true, false),
+            Some(Save),
+            "s keeps the selected picture"
+        );
+        assert_eq!(
+            browse_shortcut(KeyCode::Char('h'), true, false, true, false),
+            Some(History),
+            "h opens what you kept before"
+        );
+        assert_eq!(
+            browse_shortcut(KeyCode::Char('s'), true, true, true, false),
+            None,
+            "still typing? s is a letter"
+        );
     }
 
     #[test]

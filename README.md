@@ -70,7 +70,9 @@ fgen -t
 - Prompt box. `enter` generates, `shift`+`enter` adds a line and the box grows with your text.
 - Drag & drop (or paste) image paths — one or many, quoted or escaped — and they attach as references: previews show up in the `refs` strip above the prompt bar, click one to drop it. A path never fires a generation by accident.
 - Every generation is a square in a **grid** below the prompt, with the picture inside it; `+` at the end is the empty-prompt cell. Few images means fat cells, many images means the grid grows and shrinks them to fit.
-- `↑` drops into the grid, `←`/`→` walk the cells, `↓` hands you back the prompt bar with that image's prompt loaded. `space` opens the selected picture **full screen** (`+`/`-` zoom, arrows pan, `space` closes). `enter` keeps the selected one.
+- `↑` drops into the grid, `←`/`→` walk the cells, `↓` hands you back the prompt bar with that image's prompt loaded. `space` opens the selected picture **full screen**: `+`/`-` zoom, arrows pan once you are zoomed in, `←`/`→` step through the pictures at fit size, `space` closes.
+- After every render the cursor lands on the fat ASCII `+` cell with an empty prompt, so the next idea starts clean.
+- `/history` (or `h` in the grid) lists everything you ever kept, thumbnails and prompts, newest first — `enter` pulls one back into the grid to iterate on again.
 - **Follow-ups keep the picture.** The next prompt carries the image you are looking at back to the model, so "change the cup to a cucumber" edits it instead of generating a lonely cucumber. `/ctx` turns that off for a fresh start; with the CLI it is `--last`.
 - While it generates, a compact square snake board sits in the middle of the output panel (solid dots, head in the accent colour) and is already listening: **arrows steer it right away** (no click, no focus), and the edges wrap. `esc` pauses it; click the board to pick it back up. Every finished generation restarts the board, and the best run of all time (`🔥`) is kept in the config next to the current score.
 - **Browse and act.** `↑`/`↓` walk the gallery and put that image's prompt back in the prompt bar — edit it and press `enter` to make the next version from it. While you are browsing, single keys act on the picture you are looking at:
@@ -80,7 +82,7 @@ fgen -t
 - First run shows a four-page tour (arrow keys page through, `esc` skips); `/guide` brings it back. After enough generations a one-time coffee popup flashes for three seconds — `enter` opens it, `esc` skips, and `/settings` can turn it off.
 - Type `/` for the command palette above the prompt bar (arrows pick, tab completes, enter runs).
 
-**Nothing lands in your folders until you say so.** A session generates into a scratch cache, and the way out is a checklist that shows each picture, not just its name:
+**Nothing lands in your folders until you say so.** A session generates into a scratch cache and starts empty every time; whatever was never kept is deleted after 24 hours, so the cache cannot grow into a junk drawer. The way out is a checklist that shows each picture, not just its name:
 
 ```bash
 ctrl-c        # keep/discard checklist: space ticks, enter keeps the ticked ones, n keeps nothing
@@ -90,9 +92,10 @@ enter         # on the gallery: keep the image you are looking at right now
 
 `[✔ FINISH]` sits right next to `[⏎ GENERATE]` for the same checklist, and `/help` opens a scrollable guide (`↑↓`, `pgup`/`pgdn`, `esc` to close). Ticked images move into the save directory — the folder you are `cd`-ed in, or `~/Downloads` after `/root` — with the usual never-overwrite naming. Unticked ones are deleted, and a session that already saved everything skips the questions entirely. `[finish]` in the control bar opens the same checklist, and `esc` inside it goes back to work.
 
+- Icons are Nerd Font glyphs (⚡ generate, ✔ finish,  plus,  history,  copy,  trash); the words next to them say the same thing, so an unpatched font is still readable.
 - Blue by default; `/settings` cycles the theme, flips quality, and logs you into Codex.
 
-Slash commands: `/open` (system image viewer) · `/view` (reveal in the file manager) · `/save` · `/save-all` · `/new` · `/regen` · `/bg` · `/copy` · `/ctx` · `/guide` · `/root` · `/remove` · `/remove-all` · `/quality` · `/dir` · `/settings` · `/help` · `/clear` · `/quit`
+Slash commands: `/open` (system image viewer) · `/view` (reveal in the file manager) · `/save` · `/save-all` · `/history` · `/new` · `/regen` · `/bg` · `/copy` · `/ctx` · `/guide` · `/root` · `/remove` · `/remove-all` · `/quality` · `/dir` · `/settings` · `/help` · `/clear` · `/quit`
 
 Transparent renders stay transparent in Kitty and iTerm2 terminals (they carry an alpha channel); everywhere else the picture is composited onto your terminal background instead of turning into a black box.
 

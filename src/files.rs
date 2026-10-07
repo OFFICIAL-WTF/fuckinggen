@@ -62,6 +62,63 @@ pub fn move_file(from: &Path, to: &Path) -> Result<()> {
     Ok(())
 }
 
+/// Sessions are scratch: a new one starts empty, and anything still lying
+/// around from an old one after [`STALE_SESSION_HOURS`] is deleted, because an
+/// unsaved render is not something the user asked to keep.
+pub const STALE_SESSION_HOURS: u64 = 24;
+
+/// Delete session directories (and the renders in them) older than the TTL.
+/// Returns how many files went away.
+pub fn prune_stale_sessions(session_dir: &Path) -> usize {
+    let Some(parent) = session_dir.parent() else {
+        return 0;
+    };
+    let Ok(entries) = std::fs::read_dir(parent) else {
+        return 0;
+    };
+    let ours = session_dir.file_name();
+    let cutoff = std::time::SystemTime::now()
+        .checked_sub(std::time::Duration::from_secs(STALE_SESSION_HOURS * 3600));
+    let Some(cutoff) = cutoff else {
+        return 0;
+    };
+    let mut removed = 0;
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let name = entry.file_name();
+        if !path.is_dir() || Some(name.as_os_str()) == ours {
+            continue;
+        }
+        if !name.to_string_lossy().starts_with("session-") {
+            continue;
+        }
+        // Compare against the newest file in the session: an old directory that
+        // was touched recently is still someone's work in progress.
+        let newest = newest_mtime(&path).unwrap_or(std::time::UNIX_EPOCH);
+        if newest >= cutoff {
+            continue;
+        }
+        let Ok(files) = std::fs::read_dir(&path) else {
+            continue;
+        };
+        for file in files.flatten() {
+            if file.path().is_file() && std::fs::remove_file(file.path()).is_ok() {
+                removed += 1;
+            }
+        }
+        let _ = std::fs::remove_dir(&path);
+    }
+    removed
+}
+
+fn newest_mtime(dir: &Path) -> Option<std::time::SystemTime> {
+    let entries = std::fs::read_dir(dir).ok()?;
+    entries
+        .flatten()
+        .filter_map(|entry| entry.metadata().ok()?.modified().ok())
+        .max()
+}
+
 /// Move renders a previous session left behind into `session_dir`, so a crashed
 /// window or a forced quit never costs the user a picture they paid for: the
 /// next session shows them in the gallery like anything else. Returns the moved
@@ -338,6 +395,40 @@ mod tests {
         // Empty values are ignored, and a missing drive is not a home.
         assert_eq!(home_from(env(&[("HOME", ""), ("HOMEPATH", r"\you")])), None);
         assert_eq!(home_from(env(&[])), None);
+    }
+
+    #[test]
+    fn old_sessions_are_pruned_and_fresh_ones_left_alone() {
+        let cache = tempfile::tempdir().unwrap();
+        let ours = cache.path().join("session-222-2");
+        std::fs::create_dir(&ours).unwrap();
+        std::fs::write(ours.join("mine.png"), b"png").unwrap();
+
+        // An old session: its file is backdated two days.
+        let old_dir = cache.path().join("session-111-1");
+        std::fs::create_dir(&old_dir).unwrap();
+        let old_file = old_dir.join("stale.png");
+        std::fs::write(&old_file, b"png").unwrap();
+        let two_days_ago = std::time::SystemTime::now() - std::time::Duration::from_secs(48 * 3600);
+        let times = filetime::FileTime::from_system_time(two_days_ago);
+        filetime::set_file_mtime(&old_file, times).unwrap();
+
+        // A fresh session from another window: not ours, not old.
+        let fresh_dir = cache.path().join("session-333-3");
+        std::fs::create_dir(&fresh_dir).unwrap();
+        std::fs::write(fresh_dir.join("busy.png"), b"png").unwrap();
+
+        let removed = prune_stale_sessions(&ours);
+        assert_eq!(removed, 1);
+        assert!(!old_dir.exists(), "the stale session is gone");
+        assert!(
+            fresh_dir.join("busy.png").exists(),
+            "fresh work is untouched"
+        );
+        assert!(
+            ours.join("mine.png").exists(),
+            "the live session is untouched"
+        );
     }
 
     #[test]
