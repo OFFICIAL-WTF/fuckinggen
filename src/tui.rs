@@ -201,6 +201,9 @@ struct FinishRow {
     prompt: String,
     bytes: usize,
     keep: bool,
+    /// Its own small protocol: the grid already has one, and sharing a stateful
+    /// protocol between two differently sized render sites makes it thrash.
+    thumb: Option<StatefulProtocol>,
 }
 
 /// The exit checklist: every unsaved generation of this session, all ticked.
@@ -287,6 +290,8 @@ impl SnakeDirection {
 }
 
 const SNAKE_STEP: Duration = Duration::from_millis(130);
+/// Shown next to the best run of the session board.
+const FIRE: &str = "🔥";
 /// The board is a square block in the middle of the output panel, kept compact
 /// so it reads as a diversion rather than a takeover.
 const MIN_SNAKE_SIDE: u16 = 6;
@@ -313,6 +318,8 @@ struct SnakeGame {
     last_step: Instant,
     focused: bool,
     score: u32,
+    /// Best run this install, persisted in the config.
+    high_score: u32,
 }
 
 impl SnakeGame {
@@ -328,7 +335,24 @@ impl SnakeGame {
             last_step: Instant::now(),
             focused: false,
             score: 0,
+            high_score: 0,
         }
+    }
+
+    /// A finished generation starts a fresh board.
+    fn restart(&mut self) {
+        self.reset();
+        self.place_food();
+        self.last_step = Instant::now();
+    }
+
+    /// Returns true when the run just beat the stored best.
+    fn award(&mut self) -> bool {
+        if self.score > self.high_score {
+            self.high_score = self.score;
+            return true;
+        }
+        false
     }
 
     fn resize(&mut self, width: u16, height: u16) {
@@ -485,6 +509,9 @@ struct App {
     /// The prompt of the newest generation, shown in the terminal title when
     /// the prompt box is empty.
     last_prompt: String,
+    /// When the checklist opened, so a keystroke arriving in the same instant
+    /// (key repeat, or the keystroke that opened it) cannot answer for you.
+    finish_opened: Option<Instant>,
     /// Last title we pushed to the terminal, so we only rewrite on change.
     title_cache: String,
     /// Scratch directory for generations the user has not decided about yet.
@@ -494,7 +521,15 @@ struct App {
     /// Follow-up generations hand the selected image back to the model, since
     /// the backend request is stateless. `/ctx` turns it off.
     carry_context: bool,
-    /// True while the user is walking the gallery with the arrow keys: single
+    /// The `+` cell of the grid is selected instead of an image.
+    grid_on_plus: bool,
+    /// Full-screen image view: zoom factor and pan, in source pixels.
+    viewer: Option<Viewer>,
+    /// Cell rectangles of the grid, for clicking.
+    hit_grid: Vec<(Rect, usize)>,
+    /// Columns the grid was drawn with, so row moves match what is on screen.
+    grid_columns: usize,
+    /// True while the user is walking the grid with the arrow keys: single
     /// letters then act as shortcuts instead of typing.
     browse_mode: bool,
     /// Set as soon as the user edits the prompt, so browsing never eats a draft.
@@ -510,6 +545,8 @@ struct App {
     hit_finish_rows: Vec<(Rect, usize)>,
     hit_finish_buttons: Vec<(Rect, FinishButton)>,
     help_open: bool,
+    /// First line of the help panel, so long help can be scrolled.
+    help_scroll: usize,
     auth_ok: bool,
     auth_note: String,
     quit: bool,
@@ -528,6 +565,7 @@ impl App {
             Some(0)
         };
         let runs = config.runs.unwrap_or(0);
+        let snake_high = config.snake_high.unwrap_or(0);
         let quality = config
             .quality
             .clone()
@@ -586,12 +624,17 @@ impl App {
             palette_selection: 0,
             settings: Settings::default(),
             last_prompt: String::new(),
+            finish_opened: None,
             title_cache: String::new(),
             session_dir: session_dir.clone(),
             finish: None,
             forced_quit: false,
             carry_context: true,
             browse_mode: false,
+            grid_on_plus: false,
+            viewer: None,
+            hit_grid: Vec::new(),
+            grid_columns: 1,
             prompt_dirty: false,
             intro: intro_page,
             coffee_until: None,
@@ -601,6 +644,7 @@ impl App {
             hit_finish_rows: Vec::new(),
             hit_finish_buttons: Vec::new(),
             help_open: false,
+            help_scroll: 0,
             auth_ok: false,
             auth_note: String::new(),
             quit: false,
@@ -628,6 +672,7 @@ impl App {
                 format!("picked up {count} image(s) from an earlier session"),
             );
         }
+        app.snake.high_score = snake_high;
         app.refresh_auth();
         app.refresh_palette();
         Ok(app)
@@ -816,9 +861,28 @@ impl App {
             }
             return;
         }
+        if self.viewer.is_some() {
+            return;
+        }
         if self.finish.is_some() {
             self.on_finish_mouse(mouse);
             return;
+        }
+        // Clicking a grid cell selects it; clicking it again opens the viewer.
+        if matches!(mouse.kind, MouseEventKind::Down(MouseButton::Left)) {
+            for (rect, index) in &self.hit_grid {
+                if rect.contains(Position::new(mouse.column, mouse.row)) {
+                    let index = *index;
+                    let already =
+                        self.browse_mode && !self.grid_on_plus && self.selected == Some(index);
+                    self.browse_mode = true;
+                    self.grid_set_cursor(index);
+                    if already {
+                        self.open_viewer();
+                    }
+                    return;
+                }
+            }
         }
         let hit = self.hit_test(mouse.column, mouse.row);
         match mouse.kind {
@@ -990,7 +1054,24 @@ impl App {
             return;
         }
         if self.help_open {
-            self.help_open = false;
+            // Scrollable help: everyone who wants out presses esc or q.
+            match key.code {
+                KeyCode::Down | KeyCode::Char('j') => {
+                    self.help_scroll = self.help_scroll.saturating_add(1)
+                }
+                KeyCode::Up | KeyCode::Char('k') => {
+                    self.help_scroll = self.help_scroll.saturating_sub(1)
+                }
+                KeyCode::PageDown => self.help_scroll = self.help_scroll.saturating_add(8),
+                KeyCode::PageUp => self.help_scroll = self.help_scroll.saturating_sub(8),
+                KeyCode::Home => self.help_scroll = 0,
+                KeyCode::End => self.help_scroll = usize::MAX / 2,
+                KeyCode::Esc | KeyCode::Char('q') | KeyCode::Enter => {
+                    self.help_open = false;
+                    self.help_scroll = 0;
+                }
+                _ => {}
+            }
             return;
         }
         if self.settings.open {
@@ -1001,6 +1082,26 @@ impl App {
             match key.code {
                 KeyCode::Enter => self.dismiss_coffee(true),
                 _ => self.dismiss_coffee(false),
+            }
+            return;
+        }
+        if let Some(viewer) = self.viewer.as_mut() {
+            match key.code {
+                KeyCode::Char('+') | KeyCode::Char('=') => {
+                    viewer.zoom = (viewer.zoom * 1.25).min(8.0);
+                }
+                KeyCode::Char('-') | KeyCode::Char('_') => {
+                    viewer.zoom = (viewer.zoom / 1.25).max(1.0);
+                }
+                KeyCode::Left => viewer.pan_x = (viewer.pan_x - 0.08).clamp(0.0, 1.0),
+                KeyCode::Right => viewer.pan_x = (viewer.pan_x + 0.08).clamp(0.0, 1.0),
+                KeyCode::Up => viewer.pan_y = (viewer.pan_y - 0.08).clamp(0.0, 1.0),
+                KeyCode::Down => viewer.pan_y = (viewer.pan_y + 0.08).clamp(0.0, 1.0),
+                KeyCode::Char(' ') | KeyCode::Esc => {
+                    self.viewer = None;
+                    self.set_status(Level::Info, "back to the grid");
+                }
+                _ => {}
             }
             return;
         }
@@ -1070,6 +1171,7 @@ impl App {
                 insert_text(&mut self.input, &mut self.cursor, "\n");
                 self.refresh_palette();
             }
+            (KeyCode::Esc, _) if self.browse_mode => self.leave_grid(),
             (KeyCode::Esc, _) => {
                 if self.snake.focused {
                     self.snake.deactivate();
@@ -1093,8 +1195,22 @@ impl App {
             (KeyCode::Down, _) if palette_open => {
                 self.palette_selection = (self.palette_selection + 1) % self.palette.len();
             }
-            (KeyCode::Up, _) => self.browse(-1),
-            (KeyCode::Down, _) => self.browse(1),
+            // Up enters the grid (or walks a row up); down walks a row down and
+            // then hands the prompt back.
+            (KeyCode::Up, _) if self.browse_mode => {
+                let columns = self.grid_columns;
+                self.grid_step_row(-1, columns);
+            }
+            (KeyCode::Down, _) if self.browse_mode => {
+                let columns = self.grid_columns;
+                if !self.grid_step_row(1, columns) {
+                    self.leave_grid();
+                }
+            }
+            (KeyCode::Left, _) if self.browse_mode => self.grid_step(-1),
+            (KeyCode::Right, _) if self.browse_mode => self.grid_step(1),
+            (KeyCode::Up, _) => self.enter_grid(),
+            (KeyCode::Down, _) => self.enter_grid(),
             (KeyCode::Tab, _) if palette_open => self.complete_palette(),
             (KeyCode::Tab, _) => {
                 self.focus = self.focus.toggled();
@@ -1128,12 +1244,21 @@ impl App {
                         self.cursor = 0;
                         self.refresh_palette();
                     }
-                } else if self.input.trim().is_empty() && self.selected.is_some() {
+                } else if self.grid_on_plus && self.browse_mode && !self.input.trim().is_empty() {
+                    // The + cell is the "make something new" square.
+                    self.submit();
+                } else if self.input.trim().is_empty()
+                    && self.selected.is_some()
+                    && !self.browse_mode
+                {
                     // Enter on an empty prompt keeps the image you are looking at.
                     self.save_selected();
                 } else {
                     self.submit();
                 }
+            }
+            (KeyCode::Char(' '), KeyModifiers::NONE) if self.browse_mode && !self.grid_on_plus => {
+                self.open_viewer();
             }
             (KeyCode::Char(' '), KeyModifiers::NONE)
                 if self.focus == Focus::Button && self.input.is_empty() =>
@@ -1294,6 +1419,10 @@ impl App {
             "/view" => self.reveal(true),
             "/root" => self.move_to_downloads(),
             "/guide" => self.intro = Some(0),
+            "/help" => {
+                self.help_open = true;
+                self.help_scroll = 0;
+            }
             "/new" => self.new_prompt(),
             "/regen" => self.regenerate_selected(),
             "/bg" => self.remove_background(),
@@ -1345,7 +1474,6 @@ impl App {
                 self.settings.open = true;
                 self.settings.selection = 0;
             }
-            "/help" => self.help_open = true,
             "/clear" => {
                 self.input.clear();
                 self.cursor = 0;
@@ -1504,6 +1632,7 @@ impl App {
                 prompt: item.prompt.clone(),
                 bytes: item.bytes,
                 keep: true,
+                thumb: None,
             })
             .collect();
         if rows.is_empty() {
@@ -1511,6 +1640,7 @@ impl App {
             return;
         }
         self.finish = Some(Finish { rows, selection: 0 });
+        self.finish_opened = Some(Instant::now());
     }
 
     /// Apply the checklist: keep what is ticked, throw away what is not.
@@ -1647,6 +1777,14 @@ impl App {
     }
 
     fn on_finish_key(&mut self, key: KeyEvent) {
+        // A quarter of a second of grace: keys that arrive with (or right after)
+        // the one that opened the checklist must not make the decision.
+        if self
+            .finish_opened
+            .is_some_and(|opened| opened.elapsed() < Duration::from_millis(250))
+        {
+            return;
+        }
         let Some(finish) = self.finish.as_mut() else {
             return;
         };
@@ -1674,12 +1812,97 @@ impl App {
         }
     }
 
-    /// Walk the gallery: the arrow keys both select and put that image's prompt
-    /// back in the prompt bar, so it can be re-read, copied or edited.
-    fn browse(&mut self, delta: i32) {
-        self.select_gallery(delta);
+    /// Enter the grid: newest cell first, so the thing you just made is under
+    /// the cursor.
+    fn enter_grid(&mut self) {
         self.browse_mode = true;
+        self.grid_on_plus = false;
+        if self.selected.is_none() && !self.gallery.is_empty() {
+            self.selected = Some(self.gallery.len() - 1);
+        }
         self.load_selected_prompt();
+    }
+
+    fn grid_cursor(&self) -> usize {
+        if self.grid_on_plus {
+            self.gallery.len()
+        } else {
+            self.selected
+                .unwrap_or(self.gallery.len().saturating_sub(1))
+        }
+    }
+
+    /// Flat cursor position counted in cells (`gallery.len()` is the `+` cell).
+    fn grid_set_cursor(&mut self, position: usize) {
+        let cells = self.gallery.len() + 1;
+        let position = position % cells.max(1);
+        if position >= self.gallery.len() {
+            self.grid_on_plus = true;
+            self.set_status(Level::Info, "new one — type a prompt and press enter");
+            return;
+        }
+        self.grid_on_plus = false;
+        if self.selected != Some(position) {
+            self.selected = Some(position);
+            self.load_selected_prompt();
+        }
+    }
+
+    /// Left/right move through the flat cell order; the `+` cell is part of it.
+    fn grid_step(&mut self, delta: i32) {
+        let cells = self.gallery.len() + 1;
+        let next = grid_wrap(self.grid_cursor(), cells, delta);
+        self.grid_set_cursor(next);
+    }
+
+    /// Up/down move a row at a time. Returns false when the cursor is already
+    /// on the last row and the caller should hand control back to the prompt.
+    fn grid_step_row(&mut self, delta: i32, columns: usize) -> bool {
+        let cells = self.gallery.len() + 1;
+        match grid_row_move(self.grid_cursor(), cells, columns, delta) {
+            Some(target) => {
+                self.grid_set_cursor(target);
+                true
+            }
+            // Off the top: stay put. Off the bottom: back to the prompt.
+            None => delta < 0,
+        }
+    }
+
+    /// Open the selected picture full screen.
+    fn open_viewer(&mut self) {
+        let Some(item) = self.selected.and_then(|index| self.gallery.get(index)) else {
+            self.set_status(Level::Err, "nothing generated yet");
+            return;
+        };
+        let path = item.path.clone();
+        let Ok(bytes) = std::fs::read(&path) else {
+            self.set_status(Level::Err, "that file is gone".to_string());
+            return;
+        };
+        let Ok(image) = image::load_from_memory(&bytes) else {
+            self.set_status(Level::Err, "cannot read that image".to_string());
+            return;
+        };
+        self.viewer = Some(Viewer {
+            path,
+            image,
+            zoom: 1.0,
+            pan_x: 0.5,
+            pan_y: 0.5,
+            shown: None,
+            protocol: None,
+        });
+        self.set_status(Level::Info, "+ / - zoom · arrows pan · space closes");
+    }
+
+    /// Leave the grid and put the selected image's prompt back in the bar.
+    fn leave_grid(&mut self) {
+        self.browse_mode = false;
+        if !self.grid_on_plus {
+            self.load_selected_prompt();
+        }
+        self.set_status(Level::Info, "back at the prompt");
     }
 
     fn load_selected_prompt(&mut self) {
@@ -1929,6 +2152,11 @@ impl App {
                             human_bytes(done.bytes)
                         ),
                     );
+                    self.snake.restart();
+                    if self.snake.award() {
+                        self.config.snake_high = Some(self.snake.high_score);
+                        self.save_config();
+                    }
                     self.note_generation();
                     self.job = Job::Idle;
                     return;
@@ -2131,11 +2359,9 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     let inner_width = area.width.saturating_sub(4).max(8);
     let wanted = wrapped_lines(&app.input, inner_width).clamp(1, MAX_INPUT_ROWS as usize) as u16;
     let refs_height = if app.refs.is_empty() { 0 } else { 5 };
-    let palette_height = if app.palette.is_empty() {
-        0
-    } else {
-        app.palette.len().min(5) as u16 + 2
-    };
+    // The palette floats above the prompt bar instead of taking layout space:
+    // opening it must not resize the grid, which would re-encode every cell.
+    let palette_height = 0;
     let reserved = 1 + 6 + 1 + 2 + refs_height + palette_height;
     let max_input = area
         .height
@@ -2158,8 +2384,8 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     if refs_height > 0 {
         draw_refs(frame, app, chunks[2]);
     }
-    if palette_height > 0 {
-        draw_palette(frame, app, chunks[3]);
+    if !app.palette.is_empty() {
+        draw_palette_overlay(frame, app, chunks[4]);
     }
     draw_input(frame, app, chunks[4]);
     draw_controls(frame, app, chunks[5]);
@@ -2172,6 +2398,9 @@ fn draw(frame: &mut Frame<'_>, app: &mut App) {
     }
     if app.finish.is_some() {
         draw_finish(frame, app, area);
+    }
+    if app.viewer.is_some() {
+        draw_viewer(frame, app, area);
     }
     if app.intro.is_some() {
         draw_intro(frame, app, area);
@@ -2277,15 +2506,17 @@ fn draw_stage(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 
     if let Some(item) = app.selected.and_then(|index| app.gallery.get_mut(index))
-        && let Some(protocol) = item.protocol.as_mut()
+        && item.needs_load
     {
-        // Sit the image in the middle with breathing room instead of
-        // stretching it to the panel edges.
-        frame.render_stateful_widget(
-            StatefulImage::new().resize(Resize::Fit(None)),
-            inner_image_area(inner),
-            protocol,
-        );
+        item.needs_load = false;
+        item.image = std::fs::read(&item.path)
+            .ok()
+            .and_then(|bytes| image::load_from_memory(&bytes).ok())
+            .map(|image| image.thumbnail(512, 512));
+    }
+
+    if !app.gallery.is_empty() {
+        draw_grid(frame, app, inner);
         return;
     }
 
@@ -2312,6 +2543,170 @@ fn draw_stage(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         Paragraph::new(placeholder).alignment(Alignment::Center),
         inner,
     );
+}
+
+/// The gallery as a grid of squares: one cell per generation, plus the `+` cell
+/// that means "new prompt". Cell size follows how many cells there are, so two
+/// images fill the panel and fifteen are still all visible.
+fn draw_grid(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    app.hit_grid.clear();
+    app.snake_area = Rect::default();
+    app.snake.deactivate();
+
+    let cells = app.gallery.len() + 1;
+    let (columns, rows, cell_w, cell_h) = grid_shape(cells, area);
+    app.grid_columns = columns;
+    let cursor = app.grid_cursor();
+    let focused = app.browse_mode;
+
+    for index in 0..cells {
+        if index / columns >= rows {
+            break;
+        }
+        let cell = grid_cell(index, columns, cell_w, cell_h, area);
+        if cell.width < 4 || cell.height < 2 {
+            continue;
+        }
+        // Decode the thumbnail the first time this cell is drawn.
+        if index < app.gallery.len() {
+            let item = &mut app.gallery[index];
+            if item.needs_load {
+                item.needs_load = false;
+                item.image = std::fs::read(&item.path)
+                    .ok()
+                    .and_then(|bytes| image::load_from_memory(&bytes).ok())
+                    .map(|image| image.thumbnail(512, 512));
+            }
+            if item.protocol.is_none()
+                && let Some(image) = item.image.take()
+            {
+                item.protocol = Some(app.picker.new_resize_protocol(image));
+            }
+        }
+
+        let selected = focused && index == cursor;
+        let border = if selected {
+            app.accent()
+        } else {
+            Color::DarkGray
+        };
+        let label = if index < app.gallery.len() {
+            let item = &app.gallery[index];
+            let marker = if item.saved { "✓" } else { "" };
+            format!(
+                " {} {}{marker} ",
+                index + 1,
+                truncate_chars(
+                    &display_name(&item.path),
+                    cell.width.saturating_sub(6) as usize
+                )
+            )
+        } else {
+            " + ".to_string()
+        };
+        let block = Block::default()
+            .borders(Borders::ALL)
+            .border_style(Style::default().fg(border))
+            .title(Span::styled(
+                label,
+                Style::default().fg(border).add_modifier(Modifier::BOLD),
+            ));
+        let inner = block.inner(cell);
+        frame.render_widget(block, cell);
+
+        if index < app.gallery.len() {
+            if let Some(protocol) = app.gallery[index].protocol.as_mut() {
+                frame.render_stateful_widget(
+                    StatefulImage::new().resize(Resize::Fit(None)),
+                    inner,
+                    protocol,
+                );
+            }
+        } else {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "+",
+                    Style::default()
+                        .fg(if selected {
+                            app.accent()
+                        } else {
+                            Color::DarkGray
+                        })
+                        .add_modifier(Modifier::BOLD),
+                ))
+                .alignment(Alignment::Center),
+                inner,
+            );
+        }
+        app.hit_grid.push((cell, index));
+    }
+}
+
+/// Full-screen look at one image: `+`/`-` zoom, arrows pan, space or esc back.
+fn draw_viewer(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
+    if app.viewer.is_none() {
+        return;
+    }
+    let accent = app.accent();
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(Color::Black)),
+        area,
+    );
+
+    let key = {
+        let viewer = app.viewer.as_ref().expect("checked above");
+        (
+            viewer.zoom,
+            (viewer.pan_x * 1000.0) as i32,
+            (viewer.pan_y * 1000.0) as i32,
+            area.width,
+            area.height,
+        )
+    };
+    let stale = app
+        .viewer
+        .as_ref()
+        .is_some_and(|viewer| viewer.shown != Some(key) || viewer.protocol.is_none());
+    if stale {
+        let cropped = {
+            let viewer = app.viewer.as_ref().expect("checked above");
+            viewer_crop(&viewer.image, viewer.zoom, viewer.pan_x, viewer.pan_y, area)
+        };
+        let protocol = app.picker.new_resize_protocol(cropped);
+        if let Some(viewer) = app.viewer.as_mut() {
+            viewer.protocol = Some(protocol);
+            viewer.shown = Some(key);
+        }
+    }
+
+    let (name, zoom) = {
+        let viewer = app.viewer.as_ref().expect("checked above");
+        (display_name(&viewer.path), viewer.zoom)
+    };
+    let title = format!(
+        " {} · {:.0}% · + / - zoom · arrows pan · space closes ",
+        truncate_chars(&name, 40),
+        zoom * 100.0
+    );
+    let block = Block::default()
+        .borders(Borders::ALL)
+        .border_style(Style::default().fg(accent))
+        .title(Span::styled(
+            title,
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        ));
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    if let Some(viewer) = app.viewer.as_mut()
+        && let Some(protocol) = viewer.protocol.as_mut()
+    {
+        frame.render_stateful_widget(
+            StatefulImage::new().resize(Resize::Fit(None)),
+            inner,
+            protocol,
+        );
+    }
 }
 
 fn draw_running_stage(
@@ -2342,16 +2737,117 @@ fn draw_running_stage(
     draw_snake(frame, app, chunks[1]);
 }
 
-/// Where a generated image is drawn inside the output panel: centered with a
-/// margin, so it neither touches the border nor fills every cell.
-fn inner_image_area(area: Rect) -> Rect {
-    let margin_x = (area.width / 10).clamp(2, 10);
-    let margin_y = (area.height / 12).clamp(1, 4);
+/// Full-screen viewer state. `zoom` is a multiplier over "fit the screen", and
+/// the pan is in fractions of the visible area so it survives a resize.
+struct Viewer {
+    path: PathBuf,
+    image: image::DynamicImage,
+    zoom: f32,
+    pan_x: f32,
+    pan_y: f32,
+    /// What the currently cached protocol was built from.
+    shown: Option<(f32, i32, i32, u16, u16)>,
+    protocol: Option<StatefulProtocol>,
+}
+
+/// Crop the source to what the viewer should show: `zoom` in, panned by
+/// fractions of the visible area, clamped so the view never leaves the image.
+fn viewer_crop(
+    image: &image::DynamicImage,
+    zoom: f32,
+    pan_x: f32,
+    pan_y: f32,
+    area: Rect,
+) -> image::DynamicImage {
+    let (width, height) = (image.width() as f32, image.height() as f32);
+    // Fit the image into the area first, so zoom 1.0 means "whole picture".
+    let area_aspect = (area.width.max(1) as f32) / (area.height.max(1) as f32 / 2.0);
+    let image_aspect = width / height.max(1.0);
+    let base = if image_aspect > area_aspect {
+        (width, width / area_aspect)
+    } else {
+        (height * area_aspect, height)
+    };
+    let visible = (base.0 / zoom.max(1.0)).min(width).max(1.0);
+    let visible_h = (base.1 / zoom.max(1.0)).min(height).max(1.0);
+    let max_x = (width - visible).max(0.0);
+    let max_y = (height - visible_h).max(0.0);
+    let x = (max_x * pan_x).clamp(0.0, max_x);
+    let y = (max_y * pan_y).clamp(0.0, max_y);
+    image.crop_imm(x as u32, y as u32, visible as u32, visible_h as u32)
+}
+
+/// Flat grid movement: `cells` includes the `+` cell, and moving past either end
+/// wraps around, so left/right never dead-ends.
+fn grid_wrap(current: usize, cells: usize, delta: i32) -> usize {
+    if cells == 0 {
+        return 0;
+    }
+    ((current as i32 + delta).rem_euclid(cells as i32)) as usize
+}
+
+/// Row movement. `None` means "already off the grid in that direction", which
+/// is how the cursor hands control back to the prompt.
+fn grid_row_move(current: usize, cells: usize, columns: usize, delta: i32) -> Option<usize> {
+    let columns = columns.max(1);
+    let rows = cells.div_ceil(columns);
+    let row = current / columns;
+    let next_row = row as i32 + delta;
+    if next_row < 0 || next_row >= rows as i32 {
+        return None;
+    }
+    let target = next_row as usize * columns + current % columns;
+    (target < cells).then_some(target)
+}
+
+/// How the gallery is laid out: `count` cells (images plus the `+` cell) as a
+/// near-square grid inside `area`. Fewer images means fatter cells; more images
+/// means smaller ones, which is the whole point of a grid.
+fn grid_shape(count: usize, area: Rect) -> (usize, usize, u16, u16) {
+    if count == 0 || area.width < 6 || area.height < 4 {
+        return (1, 1, area.width, area.height);
+    }
+    // Terminal cells are about twice as tall as they are wide, so a visually
+    // square cell wants roughly two columns per row. Try every column count and
+    // keep the arrangement whose cells come out largest.
+    let mut best = (1usize, count, 0u16);
+    for columns in 1..=count {
+        let rows = count.div_ceil(columns);
+        let cell_w = area.width / columns as u16;
+        let cell_h = area.height / rows as u16;
+        if cell_w < 6 || cell_h < 3 {
+            continue;
+        }
+        // Score by the smaller of the two dimensions, weighted so a cell that
+        // is twice as wide as tall wins (that is a square of pixels), minus a
+        // penalty for cells the grid leaves empty — four images should read as
+        // 2x2, not 3 plus a lonely fourth.
+        let score = cell_h
+            .saturating_mul(2)
+            .min(cell_w)
+            .saturating_sub((columns * rows - count) as u16);
+        if score > best.2 {
+            best = (columns, rows, score);
+        }
+    }
+    let (columns, rows, _) = best;
+    (
+        columns,
+        rows,
+        area.width / columns as u16,
+        area.height / rows as u16,
+    )
+}
+
+/// The rectangle of cell `index` in a grid of `columns` inside `area`.
+fn grid_cell(index: usize, columns: usize, cell_w: u16, cell_h: u16, area: Rect) -> Rect {
+    let column = index % columns.max(1);
+    let row = index / columns.max(1);
     Rect {
-        x: area.x.saturating_add(margin_x),
-        y: area.y.saturating_add(margin_y),
-        width: area.width.saturating_sub(margin_x * 2).max(1),
-        height: area.height.saturating_sub(margin_y * 2).max(1),
+        x: area.x.saturating_add(column as u16 * cell_w),
+        y: area.y.saturating_add(row as u16 * cell_h),
+        width: cell_w.saturating_sub(1),
+        height: cell_h.saturating_sub(1),
     }
 }
 
@@ -2373,9 +2869,12 @@ fn draw_snake(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     let focused = app.snake.focused;
     let accent = app.accent();
     let title = if focused {
-        format!(" snake · {} · arrows · wrap ", app.snake.score)
+        format!(
+            " snake · {FIRE} {} · {} · arrows ",
+            app.snake.high_score, app.snake.score
+        )
     } else {
-        " snake · paused ".to_string()
+        format!(" snake · {FIRE} {} · paused ", app.snake.high_score)
     };
     let border = if focused { accent } else { Color::DarkGray };
     let block = Block::default()
@@ -2538,6 +3037,25 @@ fn draw_refs(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     }
 }
 
+/// The command palette, floating just above the prompt bar. Drawn last so it
+/// covers whatever is under it, and it never changes the layout underneath.
+fn draw_palette_overlay(frame: &mut Frame<'_>, app: &mut App, prompt: Rect) {
+    let rows = app.palette.len().min(8) as u16;
+    let height = (rows + 2).min(prompt.y.saturating_sub(1));
+    if height < 3 {
+        return;
+    }
+    let width = prompt.width.min(80);
+    let area = Rect {
+        x: prompt.x + prompt.width.saturating_sub(width) / 2,
+        y: prompt.y.saturating_sub(height),
+        width,
+        height,
+    };
+    frame.render_widget(Clear, area);
+    draw_palette(frame, app, area);
+}
+
 fn draw_palette(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     app.hit_palette.clear();
     let block = Block::default()
@@ -2662,22 +3180,25 @@ fn draw_controls(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         width: width.min(area.width.saturating_sub(x.saturating_sub(area.x))),
         height: 1,
     };
-    app.hit_button = take(x, 14);
+    app.hit_button = take(x, 15);
     x = x.saturating_add(app.hit_button.width).saturating_add(1);
+    // The finish button sits next to GENERATE, capitalised, with its tick.
+    app.hit_finish_button = take(x, 11);
+    x = x
+        .saturating_add(app.hit_finish_button.width)
+        .saturating_add(1);
     app.hit_new_button = take(x, 5);
     x = x.saturating_add(app.hit_new_button.width).saturating_add(1);
     app.hit_quality = take(x, 18);
-    x = x.saturating_add(app.hit_quality.width).saturating_add(1);
-    app.hit_finish_button = take(x, 13);
     let status_x = app
-        .hit_finish_button
+        .hit_quality
         .x
-        .saturating_add(app.hit_finish_button.width)
+        .saturating_add(app.hit_quality.width)
         .saturating_add(1);
 
     let running = matches!(app.job, Job::Running { .. });
     let label = if running {
-        " GENERATING…"
+        " GENERATING… "
     } else if app.focus == Focus::Button || app.hover == Some(Hit::Button) {
         "[⏎ GENERATE]"
     } else {
@@ -2690,7 +3211,7 @@ fn draw_controls(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
             "esc cancels · ctrl-c finish "
         }
     } else if app.browse_mode {
-        "enter re-run · r again · b cut-out · y copy prompt · esc then del removes "
+        "←→ cells · ↑↓ rows · space full screen · enter keep · r again · b cut-out · y copy "
     } else if app.selected.is_some() {
         "↑↓ · enter keep · ctrl-c finish "
     } else {
@@ -2746,7 +3267,7 @@ fn draw_controls(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         Style::default().fg(Color::DarkGray)
     };
     frame.render_widget(
-        Paragraph::new(Line::from(Span::styled(" [finish] ", finish_style))),
+        Paragraph::new(Line::from(Span::styled(" [✔ FINISH] ", finish_style))),
         app.hit_finish_button,
     );
 
@@ -2992,13 +3513,19 @@ fn apply_finish(rows: &[FinishRow], out_dir: &Path) -> FinishOutcome {
 fn draw_finish(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     app.hit_finish_rows.clear();
     app.hit_finish_buttons.clear();
-    let Some(finish) = app.finish.as_ref() else {
+    if app.finish.is_none() {
         return;
-    };
+    }
 
-    let width = 74.min(area.width);
-    let rows = finish.rows.len() as u16;
-    let height = (rows + 7).min(area.height);
+    let width = 88.min(area.width);
+    // Every row shows its picture, so rows are thumbnail-sized, not one line.
+    let row_height: u16 = 6;
+    let rows = app
+        .finish
+        .as_ref()
+        .map(|finish| finish.rows.len())
+        .unwrap_or(0) as u16;
+    let height = (rows * row_height + 8).min(area.height);
     let panel = Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
         y: area.y + area.height.saturating_sub(height) / 2,
@@ -3040,47 +3567,151 @@ fn draw_finish(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     lines.push(Line::from(""));
 
     let list_top = inner.y + lines.len() as u16;
-    let visible = inner.height.saturating_sub(lines.len() as u16 + 2);
-    let start = if finish.selection >= usize::from(visible) {
-        finish.selection + 1 - usize::from(visible)
-    } else {
-        0
-    };
-    for (index, row) in finish
-        .rows
-        .iter()
-        .enumerate()
-        .skip(start)
-        .take(usize::from(visible))
-    {
-        let selected = index == finish.selection;
-        let tick = if row.keep { "[x]" } else { "[ ]" };
-        let label = format!(
-            " {tick} {} · {} · {}",
-            display_name(&row.path),
-            human_bytes(row.bytes),
-            truncate_chars(&row.prompt.replace('\n', " "), 40)
+    frame.render_widget(Paragraph::new(lines), inner);
+
+    // Each row: tick box, a real thumbnail of the picture, then its details.
+    let thumb_w: u16 = 14;
+    // Decode any missing thumbnails first, so the picker borrow and the
+    // checklist borrow never overlap.
+    let missing: Vec<(usize, image::DynamicImage)> = app
+        .finish
+        .as_ref()
+        .map(|finish| {
+            finish
+                .rows
+                .iter()
+                .enumerate()
+                .filter(|(_, row)| row.thumb.is_none())
+                .filter_map(|(index, row)| {
+                    let bytes = std::fs::read(&row.path).ok()?;
+                    let image = image::load_from_memory(&bytes).ok()?;
+                    Some((index, image.thumbnail(256, 256)))
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    for (index, image) in missing {
+        let protocol = app.picker.new_resize_protocol(image);
+        if let Some(finish) = app.finish.as_mut()
+            && let Some(row) = finish.rows.get_mut(index)
+        {
+            row.thumb = Some(protocol);
+        }
+    }
+
+    let selection = app
+        .finish
+        .as_ref()
+        .map(|finish| finish.selection)
+        .unwrap_or(0);
+    let row_count = app
+        .finish
+        .as_ref()
+        .map(|finish| finish.rows.len())
+        .unwrap_or(0);
+    for (index, row_area) in finish_row_rects(inner, list_top, row_height, row_count, selection) {
+        let row_y = row_area.y;
+        app.hit_finish_rows.push((row_area, index));
+        let selected = index == selection;
+        frame.render_widget(
+            Paragraph::new("").style(if selected {
+                Style::default().bg(accent)
+            } else {
+                Style::default()
+            }),
+            row_area,
         );
-        let row_area = Rect {
-            x: inner.x,
-            y: list_top + (index - start) as u16,
-            width: inner.width,
+
+        // One borrow for the whole row: everything below uses locals.
+        let Some(finish) = app.finish.as_mut() else {
+            return;
+        };
+        let Some(row) = finish.rows.get_mut(index) else {
+            continue;
+        };
+
+        let tick = if row.keep { "[x]" } else { "[ ]" };
+        let tick_area = Rect {
+            x: inner.x + 1,
+            y: row_y,
+            width: 4,
             height: 1,
         };
-        app.hit_finish_rows.push((row_area, index));
-        let style = if selected {
-            Style::default()
-                .fg(Color::Black)
-                .bg(app.accent())
-                .add_modifier(Modifier::BOLD)
-        } else if row.keep {
-            Style::default().fg(Color::White)
-        } else {
-            Style::default().fg(Color::DarkGray)
+        frame.render_widget(
+            Paragraph::new(Span::styled(
+                tick.to_string(),
+                if selected {
+                    Style::default()
+                        .fg(Color::Black)
+                        .bg(accent)
+                        .add_modifier(Modifier::BOLD)
+                } else if row.keep {
+                    Style::default()
+                        .fg(Color::Green)
+                        .add_modifier(Modifier::BOLD)
+                } else {
+                    Style::default().fg(Color::DarkGray)
+                },
+            )),
+            tick_area,
+        );
+
+        // The picture itself, not a placeholder box.
+        let image_area = Rect {
+            x: inner.x + 6,
+            y: row_y,
+            width: thumb_w.min(inner.width.saturating_sub(8)),
+            height: row_height,
         };
-        lines.push(Line::from(Span::styled(label, style)));
+        match row.thumb.as_mut() {
+            Some(protocol) => frame.render_stateful_widget(
+                StatefulImage::new().resize(Resize::Fit(None)),
+                image_area,
+                protocol,
+            ),
+            None => frame.render_widget(
+                Paragraph::new(Span::styled("▣", Style::default().fg(Color::DarkGray)))
+                    .alignment(Alignment::Center),
+                image_area,
+            ),
+        }
+
+        let text_area = Rect {
+            x: image_area.x + image_area.width + 1,
+            y: row_y,
+            width: inner
+                .width
+                .saturating_sub(image_area.x - inner.x + image_area.width + 1),
+            height: row_height,
+        };
+        let details = format!("{} · {}", display_name(&row.path), human_bytes(row.bytes));
+        let prompt = row.prompt.replace('\n', " ");
+        frame.render_widget(
+            Paragraph::new(vec![
+                Line::from(Span::styled(
+                    truncate_chars(&details, text_area.width as usize),
+                    if selected {
+                        Style::default()
+                            .fg(Color::Black)
+                            .bg(accent)
+                            .add_modifier(Modifier::BOLD)
+                    } else {
+                        Style::default().fg(Color::White)
+                    },
+                )),
+                Line::from(Span::styled(
+                    truncate_chars(&prompt, text_area.width as usize),
+                    if selected {
+                        Style::default().fg(Color::Black).bg(accent)
+                    } else {
+                        Style::default().fg(Color::DarkGray)
+                    },
+                )),
+            ])
+            .wrap(Wrap { trim: true }),
+            text_area,
+        );
     }
-    frame.render_widget(Paragraph::new(lines), inner);
 
     // Buttons along the bottom row of the panel.
     let buttons_y = inner.y + inner.height.saturating_sub(1);
@@ -3119,8 +3750,14 @@ fn draw_intro(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         return;
     };
     let (title, body) = &INTRO_PAGES[page.min(INTRO_PAGES.len() - 1)];
+    // Painted over everything: the tour is a full-screen takeover.
+    frame.render_widget(Clear, area);
+    frame.render_widget(
+        Block::default().style(Style::default().bg(app.accent)),
+        area,
+    );
     let width = 74.min(area.width);
-    let height = (body.len() as u16 + 7).min(area.height);
+    let height = (body.len() as u16 + BANNER.len() as u16 + 7).min(area.height);
     let panel = Rect {
         x: area.x + area.width.saturating_sub(width) / 2,
         y: area.y + area.height.saturating_sub(height) / 2,
@@ -3147,7 +3784,14 @@ fn draw_intro(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
         ));
     let inner = block.inner(panel);
     frame.render_widget(block, panel);
-    let mut lines: Vec<Line> = vec![Line::from("")];
+    let mut lines: Vec<Line> = Vec::new();
+    for line in BANNER {
+        lines.push(Line::from(Span::styled(
+            line,
+            Style::default().fg(accent).add_modifier(Modifier::BOLD),
+        )));
+    }
+    lines.push(Line::from(""));
     for line in body {
         lines.push(Line::from(Span::styled(
             line.to_string(),
@@ -3162,7 +3806,44 @@ fn draw_intro(frame: &mut Frame<'_>, app: &mut App, area: Rect) {
     );
 }
 
-/// What the coffee popup says, WTFIS-style: loud, short, three seconds.
+/// Which checklist rows are visible and where each one sits. Rows are tall
+/// enough for a thumbnail, and the list scrolls to keep the cursor in view.
+fn finish_row_rects(
+    inner: Rect,
+    list_top: u16,
+    row_height: u16,
+    rows: usize,
+    selection: usize,
+) -> Vec<(usize, Rect)> {
+    if rows == 0 || row_height == 0 {
+        return Vec::new();
+    }
+    let visible = usize::from(inner.height.saturating_sub(2) / row_height).max(1);
+    let start = if selection >= visible {
+        selection + 1 - visible
+    } else {
+        0
+    };
+    let mut rects = Vec::new();
+    for index in start..(start + visible).min(rows) {
+        let y = list_top + ((index - start) as u16) * row_height;
+        if y + row_height > inner.y + inner.height {
+            break;
+        }
+        rects.push((
+            index,
+            Rect {
+                x: inner.x,
+                y,
+                width: inner.width,
+                height: row_height,
+            },
+        ));
+    }
+    rects
+}
+
+/// What the coffee popup says, WTFIS-style: loud, short, three seconds./// What the coffee popup says, WTFIS-style: loud, short, three seconds.
 fn coffee_lines(remaining: Duration) -> Vec<Line<'static>> {
     vec![
         Line::from(Span::styled(
@@ -3249,7 +3930,7 @@ fn draw_help(frame: &mut Frame<'_>, app: &App, area: Rect) {
                 .add_modifier(Modifier::BOLD),
         ))
         .title_bottom(Span::styled(
-            " any key closes ",
+            " ↑↓ scroll · pgup/pgdn · esc or q closes ",
             Style::default().fg(Color::DarkGray),
         ));
     let inner = block.inner(panel);
@@ -3294,7 +3975,24 @@ fn draw_help(frame: &mut Frame<'_>, app: &App, area: Rect) {
             Span::styled(what.to_string(), Style::default().fg(Color::White)),
         ]));
     }
-    frame.render_widget(Paragraph::new(lines), inner);
+    // Scrolling: clip the list to the panel and say where we are.
+    let visible = usize::from(inner.height);
+    let offset = app.help_scroll.min(lines.len().saturating_sub(1));
+    let end = (offset + visible).min(lines.len());
+    frame.render_widget(Paragraph::new(lines[offset..end].to_vec()), inner);
+    frame.render_widget(
+        Paragraph::new(Span::styled(
+            format!(" {}/{} ", end.min(lines.len()), lines.len()),
+            Style::default().fg(Color::DarkGray),
+        ))
+        .alignment(Alignment::Right),
+        Rect {
+            x: inner.x,
+            y: panel.y + panel.height.saturating_sub(1),
+            width: inner.width,
+            height: 0,
+        },
+    );
 }
 
 fn hit_test_static(button: Rect, quality: Rect, input: Rect, column: u16, row: u16) -> Option<Hit> {
@@ -3317,6 +4015,15 @@ const COFFEE_URL: &str = "https://buymeacoffee.com/professorvolodymyr";
 const COFFEE_AFTER_RUNS: u32 = 10;
 const COFFEE_SECONDS: u64 = 3;
 const COFFEE_TITLE: &str = " BUY ME A COFFEE ";
+
+/// Block-letter banner for the tour, drawn as text so it works in any terminal.
+const BANNER: [&str; 5] = [
+    "  ███████╗ ██████╗ ███████╗███╗   ██╗",
+    "  ██╔════╝██╔════╝ ██╔════╝████╗  ██║",
+    "  █████╗  ██║  ███╗█████╗  ██╔██╗ ██║",
+    "  ██╔══╝  ██║   ██║██╔══╝  ██║╚██╗██║",
+    "  ██║     ╚██████╔╝███████╗██║ ╚████║",
+];
 
 /// The first-run tour. Four short pages, because fgen does more than it looks.
 const INTRO_PAGES: [(&str, [&str; 5]); 4] = [
@@ -3797,6 +4504,153 @@ mod tests {
     }
 
     #[test]
+    fn grid_navigation_wraps_and_exits_at_the_bottom() {
+        // Three images plus the + cell, three columns: one row.
+        let cells = 4;
+        assert_eq!(grid_wrap(0, cells, -1), 3, "left from the first cell wraps");
+        assert_eq!(grid_wrap(3, cells, 1), 0, "right from the + cell wraps");
+        assert_eq!(grid_wrap(1, cells, 1), 2);
+        // Single row: down means "done browsing", up stays put.
+        assert_eq!(grid_row_move(0, cells, 3, -1), None);
+        assert_eq!(grid_row_move(2, cells, 3, 1), None);
+
+        // Two rows of three: down moves within the grid, up comes back.
+        let cells = 6;
+        assert_eq!(grid_row_move(1, cells, 3, 1), Some(4));
+        assert_eq!(grid_row_move(4, cells, 3, -1), Some(1));
+        // Last row down and first row up are the exits.
+        assert_eq!(grid_row_move(4, cells, 3, 1), None);
+        assert_eq!(grid_row_move(1, cells, 3, -1), None);
+        // Stops at the missing cell instead of walking off the end.
+        assert_eq!(
+            grid_row_move(2, 5, 3, 1),
+            None,
+            "only two cells on that row"
+        );
+        assert_eq!(grid_wrap(0, 0, 1), 0, "no cells, no panic");
+    }
+
+    #[test]
+    fn viewer_crop_respects_zoom_and_pan() {
+        // A gradient, so a crop's position is readable from its first pixel.
+        let mut buffer = image::RgbaImage::new(400, 200);
+        for x in 0..400u32 {
+            for y in 0..200u32 {
+                buffer.put_pixel(x, y, image::Rgba([(x / 2) as u8, (y / 2) as u8, 0, 255]));
+            }
+        }
+        let image = image::DynamicImage::ImageRgba8(buffer);
+
+        // Wide area: zoom crops the height, since the width already fits.
+        let wide = Rect::new(0, 0, 40, 20);
+        let full = viewer_crop(&image, 1.0, 0.5, 0.5, wide);
+        assert!(
+            full.width() >= 390 && full.height() >= 190,
+            "{}x{}",
+            full.width(),
+            full.height()
+        );
+        let zoomed = viewer_crop(&image, 2.0, 0.5, 0.5, wide);
+        assert!(
+            zoomed.height() < full.height(),
+            "zoom should show less: {} vs {}",
+            zoomed.height(),
+            full.height()
+        );
+
+        // Narrow area: zoom crops the width, and pan moves that window.
+        let narrow = Rect::new(0, 0, 20, 40);
+        let left = viewer_crop(&image, 2.0, 0.0, 0.5, narrow);
+        let right = viewer_crop(&image, 2.0, 1.0, 0.5, narrow);
+        assert!(
+            left.width() < image.width(),
+            "zoom shows a slice, not everything"
+        );
+        assert_eq!(
+            left.width(),
+            right.width(),
+            "pan does not change the window size"
+        );
+        let first = |crop: &image::DynamicImage| crop.to_rgba8().get_pixel(0, 0)[0] as u32 * 2;
+        assert_eq!(first(&left), 0, "left edge of the picture");
+        assert_eq!(
+            first(&right),
+            image.width() - left.width(),
+            "panned to the right edge"
+        );
+    }
+
+    #[test]
+    fn grid_cells_shrink_as_images_pile_up() {
+        let area = Rect::new(0, 0, 120, 40);
+        // Two images plus the + cell: three fat cells in one row.
+        let (columns, rows, cell_w, cell_h) = grid_shape(3, area);
+        assert_eq!((columns, rows), (3, 1));
+        assert!(cell_w >= 40 && cell_h >= 39, "{cell_w}x{cell_h}");
+
+        // Four cells: a balanced 2x2 beats a lopsided 3+1.
+        let (columns, rows, _, _) = grid_shape(4, area);
+        assert_eq!((columns, rows), (2, 2));
+
+        // Many images: the grid grows rows and the cells get smaller.
+        let (columns, rows, small_w, small_h) = grid_shape(17, area);
+        assert!(rows >= 2, "a full gallery wraps to {} rows", rows);
+        assert!(small_w < cell_w && small_h < cell_h, "{small_w}x{small_h}");
+        assert!(columns * rows >= 17, "every cell has a slot");
+
+        // Cells never overlap and stay inside the area.
+        let last = grid_cell(16, columns, small_w, small_h, area);
+        assert!(last.x + last.width <= area.width);
+        assert!(last.y + last.height <= area.height);
+        let first = grid_cell(0, columns, small_w, small_h, area);
+        assert_eq!((first.x, first.y), (0, 0));
+        let next = grid_cell(1, columns, small_w, small_h, area);
+        assert_eq!(next.x, first.x + small_w, "cells tile without gaps");
+    }
+
+    #[test]
+    fn grid_shape_survives_a_tiny_terminal() {
+        let (columns, rows, _, _) = grid_shape(5, Rect::new(0, 0, 20, 6));
+        assert!(columns >= 1 && rows >= 1);
+        let (columns, rows, _, _) = grid_shape(0, Rect::new(0, 0, 120, 40));
+        assert_eq!((columns, rows), (1, 1));
+    }
+
+    #[test]
+    fn snake_high_score_only_moves_up() {
+        let mut game = SnakeGame::new();
+        game.resize(12, 12);
+        game.score = 0;
+        assert!(!game.award(), "nothing to celebrate yet");
+        assert_eq!(game.high_score, 0);
+        game.score = 5;
+        assert!(game.award());
+        assert_eq!(game.high_score, 5);
+        game.score = 2;
+        assert!(!game.award(), "a worse run does not lower the best");
+        assert_eq!(game.high_score, 5);
+    }
+
+    #[test]
+    fn a_finished_generation_restarts_the_board() {
+        let mut game = SnakeGame::new();
+        game.resize(12, 12);
+        game.focused = true;
+        game.score = 4;
+        let before = game.body[0];
+        game.step();
+        game.restart();
+        assert_eq!(game.score, 0, "score resets");
+        assert_eq!(
+            game.body.len(),
+            (12 / 4).clamp(4, 10),
+            "starter length again"
+        );
+        assert!(game.focused, "and it is still listening");
+        let _ = before;
+    }
+
+    #[test]
     fn browse_shortcuts_only_fire_on_an_untouched_selection() {
         use BrowseAction::*;
         // Walking the gallery with a loaded, untouched prompt: the verbs work.
@@ -3867,6 +4721,36 @@ mod tests {
             .decode(payload)
             .unwrap();
         assert_eq!(String::from_utf8(decoded).unwrap(), "a girl holding a cup");
+    }
+
+    #[test]
+    fn checklist_rows_fit_thumbnails_and_scroll_with_the_cursor() {
+        let inner = Rect::new(2, 10, 80, 30);
+        // Every row is tall enough to show a picture, and starts below the header.
+        let rects = finish_row_rects(inner, 13, 6, 2, 0);
+        assert_eq!(rects.len(), 2);
+        assert_eq!(rects[0].1.y, 13);
+        assert_eq!(rects[0].1.height, 6);
+        assert_eq!(rects[1].1.y, 19, "rows follow each other");
+        assert!(rects[0].1.x == inner.x && rects[0].1.width == inner.width);
+
+        // Deep in a long list the window scrolls so the cursor stays visible.
+        let many = finish_row_rects(inner, 13, 6, 40, 20);
+        let indexes: Vec<usize> = many.iter().map(|(index, _)| *index).collect();
+        assert!(
+            indexes.contains(&20),
+            "cursor row is on screen: {indexes:?}"
+        );
+        assert!(indexes.windows(2).all(|pair| pair[1] == pair[0] + 1));
+        // And nothing is drawn past the bottom of the panel.
+        assert!(
+            many.iter()
+                .all(|(_, rect)| rect.y + rect.height <= inner.y + inner.height)
+        );
+
+        // Degenerate inputs do not panic.
+        assert!(finish_row_rects(inner, 13, 6, 0, 0).is_empty());
+        assert!(finish_row_rects(inner, 13, 0, 5, 0).is_empty());
     }
 
     #[test]
@@ -3997,18 +4881,21 @@ mod tests {
                 prompt: "taken".to_string(),
                 bytes: 4,
                 keep: true,
+                thumb: None,
             },
             FinishRow {
                 path: collides.clone(),
                 prompt: "taken".to_string(),
                 bytes: 6,
                 keep: true,
+                thumb: None,
             },
             FinishRow {
                 path: drop.clone(),
                 prompt: "drop-me".to_string(),
                 bytes: 7,
                 keep: false,
+                thumb: None,
             },
         ];
         let outcome = apply_finish(&rows, out.path());
@@ -4053,6 +4940,7 @@ mod tests {
                 prompt: item.prompt.clone(),
                 bytes: item.bytes,
                 keep: true,
+                thumb: None,
             })
             .collect();
         assert_eq!(rows.len(), 2, "already saved images are not asked about");

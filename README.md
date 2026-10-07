@@ -69,9 +69,10 @@ fgen -t
 
 - Prompt box. `enter` generates, `shift`+`enter` adds a line and the box grows with your text.
 - Drag & drop (or paste) image paths — one or many, quoted or escaped — and they attach as references: previews show up in the `refs` strip above the prompt bar, click one to drop it. A path never fires a generation by accident.
-- Every generation lands in a gallery: `↑`/`↓` (or `ctrl-p`/`ctrl-n`) walk through them, the title shows `index/total`, the file size, and whether it is `saved` or `unsaved`.
+- Every generation is a square in a **grid** below the prompt, with the picture inside it; `+` at the end is the empty-prompt cell. Few images means fat cells, many images means the grid grows and shrinks them to fit.
+- `↑` drops into the grid, `←`/`→` walk the cells, `↓` hands you back the prompt bar with that image's prompt loaded. `space` opens the selected picture **full screen** (`+`/`-` zoom, arrows pan, `space` closes). `enter` keeps the selected one.
 - **Follow-ups keep the picture.** The next prompt carries the image you are looking at back to the model, so "change the cup to a cucumber" edits it instead of generating a lonely cucumber. `/ctx` turns that off for a fresh start; with the CLI it is `--last`.
-- While it generates, a compact square snake board sits in the middle of the output panel (solid dots, head in the accent colour) and is already listening: **arrows steer it right away** (no click, no focus), and the edges wrap. `esc` pauses it; click the board to pick it back up.
+- While it generates, a compact square snake board sits in the middle of the output panel (solid dots, head in the accent colour) and is already listening: **arrows steer it right away** (no click, no focus), and the edges wrap. `esc` pauses it; click the board to pick it back up. Every finished generation restarts the board, and the best run of all time (`🔥`) is kept in the config next to the current score.
 - **Browse and act.** `↑`/`↓` walk the gallery and put that image's prompt back in the prompt bar — edit it and press `enter` to make the next version from it. While you are browsing, single keys act on the picture you are looking at:
   `enter` keep · `del` remove · `r` another take (the model is told the last one did not land) · `b` cut the background out (transparent PNG) · `y` copy the prompt to the clipboard · `+` start a fresh prompt.
 - `[+]` in the control bar does the same as `+`: an empty prompt, the default state after a render.
@@ -79,7 +80,7 @@ fgen -t
 - First run shows a four-page tour (arrow keys page through, `esc` skips); `/guide` brings it back. After enough generations a one-time coffee popup flashes for three seconds — `enter` opens it, `esc` skips, and `/settings` can turn it off.
 - Type `/` for the command palette above the prompt bar (arrows pick, tab completes, enter runs).
 
-**Nothing lands in your folders until you say so.** A session generates into a scratch cache, and the way out is a checklist:
+**Nothing lands in your folders until you say so.** A session generates into a scratch cache, and the way out is a checklist that shows each picture, not just its name:
 
 ```bash
 ctrl-c        # keep/discard checklist: space ticks, enter keeps the ticked ones, n keeps nothing
@@ -87,7 +88,7 @@ ctrl-c ctrl-c # impatient? the second one quits and leaves the staged files in t
 enter         # on the gallery: keep the image you are looking at right now
 ```
 
-Ticked images move into the save directory — the folder you are `cd`-ed in, or `~/Downloads` after `/root` — with the usual never-overwrite naming. Unticked ones are deleted, and a session that already saved everything skips the questions entirely. `[finish]` in the control bar opens the same checklist, and `esc` inside it goes back to work.
+`[✔ FINISH]` sits right next to `[⏎ GENERATE]` for the same checklist, and `/help` opens a scrollable guide (`↑↓`, `pgup`/`pgdn`, `esc` to close). Ticked images move into the save directory — the folder you are `cd`-ed in, or `~/Downloads` after `/root` — with the usual never-overwrite naming. Unticked ones are deleted, and a session that already saved everything skips the questions entirely. `[finish]` in the control bar opens the same checklist, and `esc` inside it goes back to work.
 
 - Blue by default; `/settings` cycles the theme, flips quality, and logs you into Codex.
 

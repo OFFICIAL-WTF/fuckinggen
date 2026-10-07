@@ -20,6 +20,8 @@ pub struct Config {
     pub coffee_enabled: Option<bool>,
     /// Whether it already appeared, so it only ever shows once.
     pub coffee_shown: Option<bool>,
+    /// Best snake run, because a high score that resets is not a high score.
+    pub snake_high: Option<u32>,
 }
 
 pub fn config_dir() -> PathBuf {
@@ -77,6 +79,7 @@ mod tests {
             intro_seen: Some(true),
             coffee_enabled: Some(false),
             coffee_shown: Some(true),
+            snake_high: Some(7),
         };
         save_to(&path, &config).unwrap();
         let loaded = load_from(&path);
@@ -87,6 +90,7 @@ mod tests {
         assert_eq!(loaded.intro_seen, Some(true));
         assert_eq!(loaded.coffee_enabled, Some(false));
         assert_eq!(loaded.coffee_shown, Some(true));
+        assert_eq!(loaded.snake_high, Some(7));
     }
 
     #[test]
