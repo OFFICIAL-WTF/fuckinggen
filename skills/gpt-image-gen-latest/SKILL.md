@@ -7,7 +7,7 @@ description: Generate or edit images with the user's ChatGPT subscription from t
 
 Terminal image generation on the user's **own ChatGPT subscription** — no API key, no per-image API billing. It calls the same ChatGPT/Codex backend channel the Codex CLI uses, with the login already on this machine. Today's model is **ChatGPT Images 2.5**.
 
-Binary: `fgen` (alias: `fuckinggen`). Source: `~/GSpace/Opensource/HTF/fuckinggen` (GitHub: `prophesourvolodymyr/fuckinggen`).
+Binary: `fgen` (alias: `fuckinggen`). Source: `~/GSpace/Opensource/WTF/fuckinggen` (GitHub: `prophesourvolodymyr/fuckinggen`).
 
 ## When to use
 
@@ -18,7 +18,7 @@ Binary: `fgen` (alias: `fuckinggen`). Source: `~/GSpace/Opensource/HTF/fuckingge
 
 ## Prerequisites
 
-1. `fgen` on PATH (`which fgen`). Install with Homebrew (`brew tap prophesourvolodymyr/fuckinggen && brew install fuckinggen`), from the AUR (`yay -S fgen` on Arch), or from source (`cd ~/GSpace/Opensource/HTF/fuckinggen && cargo install --path .`).
+1. `fgen` on PATH (`which fgen`). Install with Homebrew (`brew tap prophesourvolodymyr/fuckinggen && brew install fuckinggen`), from the AUR (`yay -S fgen` on Arch), or from source (`cd ~/GSpace/Opensource/WTF/fuckinggen && cargo install --path .`).
 2. Subscription login: `fgen auth` must report a valid token. If it fails, ask the user to run `codex login`, then `fgen auth` again. **Never** ask for or use an OpenAI API key.
 
 ## Commands
