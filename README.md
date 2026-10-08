@@ -4,11 +4,11 @@
 
 <p align="center">
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-000000?style=flat-square&logo=rust&logoColor=white" alt="Built with Rust" /></a>
-  <a href="https://github.com/prophesourvolodymyr/fuckinggen/actions/workflows/ci.yml"><img src="https://github.com/prophesourvolodymyr/fuckinggen/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
-  <a href="https://github.com/prophesourvolodymyr/fuckinggen/releases"><img src="https://img.shields.io/github/v/release/prophesourvolodymyr/fuckinggen?display_name=tag&style=flat-square" alt="Latest release" /></a>
-  <a href="https://github.com/prophesourvolodymyr/homebrew-fuckinggen"><img src="https://img.shields.io/badge/Homebrew-tap-FBB040?style=flat-square&logo=homebrew&logoColor=white" alt="Homebrew tap" /></a>
+  <a href="https://github.com/OFFICIAL-WTF/fuckinggen/actions/workflows/ci.yml"><img src="https://github.com/OFFICIAL-WTF/fuckinggen/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
+  <a href="https://github.com/OFFICIAL-WTF/fuckinggen/releases"><img src="https://img.shields.io/github/v/release/prophesourvolodymyr/fuckinggen?display_name=tag&style=flat-square" alt="Latest release" /></a>
+  <a href="https://github.com/OFFICIAL-WTF/homebrew-fuckinggen"><img src="https://img.shields.io/badge/Homebrew-tap-FBB040?style=flat-square&logo=homebrew&logoColor=white" alt="Homebrew tap" /></a>
   <a href="https://aur.archlinux.org/packages/fgen"><img src="https://img.shields.io/aur/version/fgen?style=flat-square&logo=archlinux&logoColor=white&label=AUR" alt="AUR package" /></a>
-  <a href="https://github.com/prophesourvolodymyr/fuckinggen/blob/main/LICENSE"><img src="https://img.shields.io/github/license/prophesourvolodymyr/fuckinggen?style=flat-square" alt="WTFPL license" /></a>
+  <a href="https://github.com/OFFICIAL-WTF/fuckinggen/blob/main/LICENSE"><img src="https://img.shields.io/github/license/prophesourvolodymyr/fuckinggen?style=flat-square" alt="WTFPL license" /></a>
   <img src="https://img.shields.io/badge/macOS-supported-000000?style=flat-square&logo=apple&logoColor=white" alt="macOS supported" />
   <img src="https://img.shields.io/badge/Linux-supported-FCC624?style=flat-square&logo=linux&logoColor=black" alt="Linux supported" />
   <img src="https://img.shields.io/badge/Windows-supported-0078D4?style=flat-square&logo=windows&logoColor=white" alt="Windows supported" />
@@ -108,11 +108,11 @@ Transparent renders stay transparent in Kitty and iTerm2 terminals (they carry a
 **Homebrew**
 
 ```bash
-brew tap prophesourvolodymyr/fuckinggen
+brew tap OFFICIAL-WTF/fuckinggen
 brew install fuckinggen
 ```
 
-**Manual:** download `…-aarch64-apple-darwin.tar.gz` (Apple silicon) or `…-x86_64-apple-darwin.tar.gz` (Intel) from [Releases](https://github.com/prophesourvolodymyr/fuckinggen/releases/latest). Each archive holds both binaries plus the README and LICENSE.
+**Manual:** download `…-aarch64-apple-darwin.tar.gz` (Apple silicon) or `…-x86_64-apple-darwin.tar.gz` (Intel) from [Releases](https://github.com/OFFICIAL-WTF/fuckinggen/releases/latest). Each archive holds both binaries plus the README and LICENSE.
 
 ---
 
@@ -133,13 +133,13 @@ sudo bash /usr/share/fgen/install.sh --skills-only
 **Homebrew**
 
 ```bash
-brew tap prophesourvolodymyr/fuckinggen
+brew tap OFFICIAL-WTF/fuckinggen
 brew install fuckinggen
 ```
 
 Homebrew builds it from source and pulls Rust in as a build dependency.
 
-**Manual:** grab the Linux archive from [Releases](https://github.com/prophesourvolodymyr/fuckinggen/releases/latest) — the release workflow builds x86_64 and aarch64.
+**Manual:** grab the Linux archive from [Releases](https://github.com/OFFICIAL-WTF/fuckinggen/releases/latest) — the release workflow builds x86_64 and aarch64.
 
 Everything on Linux:
 
@@ -151,7 +151,7 @@ Everything on Linux:
 
 ## <img src="./assets/platform-windows.svg" alt="Windows" width="18" height="18" /> Windows
 
-**Manual:** download the Windows zip (`…-x86_64-pc-windows-*.zip`) from [Releases](https://github.com/prophesourvolodymyr/fuckinggen/releases/latest), unzip it somewhere permanent, and add that folder to your `PATH`. It contains `fgen.exe`, `fuckinggen.exe` (same program), the README, the license, and the agent skill.
+**Manual:** download the Windows zip (`…-x86_64-pc-windows-*.zip`) from [Releases](https://github.com/OFFICIAL-WTF/fuckinggen/releases/latest), unzip it somewhere permanent, and add that folder to your `PATH`. It contains `fgen.exe`, `fuckinggen.exe` (same program), the README, the license, and the agent skill.
 
 Everything on Windows:
 
