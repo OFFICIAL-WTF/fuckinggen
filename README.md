@@ -21,6 +21,8 @@
 
 <p align="center">Images from your own ChatGPT subscription, straight from the terminal. CLI and a real TUI.</p>
 
+<p align="center"><a href="https://wtf.professorvolodymyr.com/fgen/">Project site</a> · <a href="https://wtf.professorvolodymyr.com/fgen/docs/">Docs</a> · <a href="https://wtf.professorvolodymyr.com/">WTF hub</a></p>
+
 ## See it work
 
 <p align="center"><a href="#install">Don't Care - Download this Fucker Now</a></p>
