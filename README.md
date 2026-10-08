@@ -5,10 +5,10 @@
 <p align="center">
   <a href="https://www.rust-lang.org/"><img src="https://img.shields.io/badge/Rust-000000?style=flat-square&logo=rust&logoColor=white" alt="Built with Rust" /></a>
   <a href="https://github.com/OFFICIAL-WTF/fuckinggen/actions/workflows/ci.yml"><img src="https://github.com/OFFICIAL-WTF/fuckinggen/actions/workflows/ci.yml/badge.svg" alt="CI" /></a>
-  <a href="https://github.com/OFFICIAL-WTF/fuckinggen/releases"><img src="https://img.shields.io/github/v/release/prophesourvolodymyr/fuckinggen?display_name=tag&style=flat-square" alt="Latest release" /></a>
+  <a href="https://github.com/OFFICIAL-WTF/fuckinggen/releases"><img src="https://img.shields.io/github/v/release/OFFICIAL-WTF/fuckinggen?display_name=tag&style=flat-square" alt="Latest release" /></a>
   <a href="https://github.com/OFFICIAL-WTF/homebrew-fuckinggen"><img src="https://img.shields.io/badge/Homebrew-tap-FBB040?style=flat-square&logo=homebrew&logoColor=white" alt="Homebrew tap" /></a>
   <a href="https://aur.archlinux.org/packages/fgen"><img src="https://img.shields.io/aur/version/fgen?style=flat-square&logo=archlinux&logoColor=white&label=AUR" alt="AUR package" /></a>
-  <a href="https://github.com/OFFICIAL-WTF/fuckinggen/blob/main/LICENSE"><img src="https://img.shields.io/github/license/prophesourvolodymyr/fuckinggen?style=flat-square" alt="WTFPL license" /></a>
+  <a href="https://github.com/OFFICIAL-WTF/fuckinggen/blob/main/LICENSE"><img src="https://img.shields.io/github/license/OFFICIAL-WTF/fuckinggen?style=flat-square" alt="WTFPL license" /></a>
   <img src="https://img.shields.io/badge/macOS-supported-000000?style=flat-square&logo=apple&logoColor=white" alt="macOS supported" />
   <img src="https://img.shields.io/badge/Linux-supported-FCC624?style=flat-square&logo=linux&logoColor=black" alt="Linux supported" />
   <img src="https://img.shields.io/badge/Windows-supported-0078D4?style=flat-square&logo=windows&logoColor=white" alt="Windows supported" />
